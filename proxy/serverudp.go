@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"sync"
 
 	"github.com/AdguardTeam/dnsproxy/internal/bootstrap"
 	proxynetutil "github.com/AdguardTeam/dnsproxy/internal/netutil"
@@ -15,6 +16,19 @@ import (
 	"github.com/AdguardTeam/golibs/syncutil"
 	"github.com/miekg/dns"
 )
+
+// udpPackPool is a pool of reusable wire-buffer pointers for packing DNS
+// responses before writing them to a UDP socket.  2048 bytes covers the
+// practical DNS-over-UDP ceiling (DNS Flag Day 2020 recommends ≤ 1232 bytes;
+// EDNS0 cap is 4096 bytes but real-world responses are almost always < 2048).
+// If a response exceeds the pool-buffer length, PackBuffer allocates a new
+// slice and the pool slot is updated to the larger allocation so future calls
+// of similar size avoid re-allocating.
+//
+// Safety: UDPWrite is synchronous on all supported platforms (Linux sendmsg,
+// BSD sendmsg, Windows WSASendMsg).  The kernel copies the wire bytes before
+// returning, so the pool buffer is safe to return immediately after the call.
+var udpPackPool = sync.Pool{New: func() any { b := make([]byte, 2048); return &b }}
 
 // initUDPListeners initializes UDP listeners with configured addresses.
 func (p *Proxy) initUDPListeners(ctx context.Context) (err error) {
@@ -162,23 +176,33 @@ func (p *Proxy) udpHandlePacket(
 	}
 }
 
-// Writes a response to the UDP client
+// respondUDP writes a DNS response to the UDP client.
 func (p *Proxy) respondUDP(d *DNSContext) error {
 	resp := d.Res
-
 	if resp == nil {
-		// Do nothing if no response has been written
 		return nil
 	}
 
-	bytes, err := resp.Pack()
+	pb := udpPackPool.Get().(*[]byte)
+	wire, err := resp.PackBuffer(*pb)
 	if err != nil {
+		udpPackPool.Put(pb)
+
 		return fmt.Errorf("packing message: %w", err)
+	}
+
+	// If PackBuffer had to grow beyond the pool buffer, update the pool slot
+	// to the larger allocation so subsequent large responses reuse it.
+	if cap(wire) > cap(*pb) {
+		*pb = wire[:cap(wire)]
 	}
 
 	conn := d.Conn.(*net.UDPConn)
 	rAddr := net.UDPAddrFromAddrPort(d.Addr)
-	n, err := proxynetutil.UDPWrite(bytes, conn, rAddr, d.localIP)
+	n, err := proxynetutil.UDPWrite(wire, conn, rAddr, d.localIP)
+	// UDPWrite is synchronous: the kernel copies wire bytes before returning,
+	// so the buffer is always safe to return to the pool at this point.
+	udpPackPool.Put(pb)
 	if err != nil {
 		if errors.Is(err, net.ErrClosed) {
 			return nil
@@ -187,8 +211,8 @@ func (p *Proxy) respondUDP(d *DNSContext) error {
 		return fmt.Errorf("writing message: %w", err)
 	}
 
-	if n != len(bytes) {
-		return fmt.Errorf("udpWrite() returned with %d != %d", n, len(bytes))
+	if n != len(wire) {
+		return fmt.Errorf("udpWrite() returned with %d != %d", n, len(wire))
 	}
 
 	return nil
