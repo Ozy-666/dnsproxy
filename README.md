@@ -118,11 +118,21 @@ calling `Unpack`.  Any legitimate DoH request fits in 64 KB.
 
 ## Versioning
 
-We maintain specific `-edge` tags based on upstream stable releases.
+The fork is based on upstream stable releases and extended with edge commits on
+the `edge-udp-pool` branch.
 
-| Tag | Upstream base | Key upstream changes |
+| Tag | Upstream base | Notes |
 |---|---|---|
 | `v0.81.4-edge.1` | `v0.81.4` | DNSSEC DO-bit cache key fix, QUIC idle timeout hardening |
+
+**Branch `edge-udp-pool` commits on top of `v0.81.4-edge.1`** (in order):
+
+| Commit | Description |
+|---|---|
+| `bbd79ad` | `atomic.Bool` for `Proxy.started`; `tcpPackPool` zero-alloc TCP/DoT path |
+| `0b14b22` | `rttLock` mutex → `atomic.Pointer` CoW map (lock-free RTT reads) |
+| `00fc061` | DoH POST body bounded to `dns.MaxMsgSize` via `io.LimitReader` |
+| `716e780` | `QUICMaxIncomingStreams` configurable field, default 64, range [1,1024] |
 
 The fork module path remains `github.com/AdguardTeam/dnsproxy` (unchanged from
 upstream) so it integrates via a `go.mod replace` directive in the host repo:
