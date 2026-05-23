@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 
 	"github.com/AdguardTeam/dnsproxy/internal/bootstrap"
 	proxynetutil "github.com/AdguardTeam/dnsproxy/internal/netutil"
@@ -16,6 +17,10 @@ import (
 	"github.com/AdguardTeam/golibs/syncutil"
 	"github.com/miekg/dns"
 )
+
+// tcpPackPool is a pool of 2+dns.MaxMsgSize byte slices for TCP read/write.
+// Layout: [len_hi][len_lo][dns_wire_0..dns_wire_N].
+var tcpPackPool = sync.Pool{New: func() any { b := make([]byte, 2+dns.MaxMsgSize); return &b }}
 
 // initTCPListeners initializes TCP listeners with configured addresses.
 func (p *Proxy) initTCPListeners(ctx context.Context) (err error) {
@@ -168,7 +173,10 @@ func (p *Proxy) handleTCPConnection(
 // readDNSReq returns DNS request message from the given connection or nil if
 // it failed to read it.  Properly logs the error if it happened.
 func (p *Proxy) readDNSReq(ctx context.Context, conn net.Conn) (req *dns.Msg) {
-	packet, err := readPrefixed(conn)
+	pb := tcpPackPool.Get().(*[]byte)
+	defer tcpPackPool.Put(pb)
+
+	packet, err := readPrefixedBuf(conn, *pb)
 	if err != nil {
 		logWithNonCrit(ctx, err, "reading msg", ProtoTCP, p.logger)
 
@@ -189,58 +197,51 @@ func (p *Proxy) readDNSReq(ctx context.Context, conn net.Conn) (req *dns.Msg) {
 // errTooLarge means that a DNS message is larger than 64KiB.
 const errTooLarge errors.Error = "dns message is too large"
 
-// readPrefixed reads a DNS message with a 2-byte prefix containing message
-// length from conn.
-func readPrefixed(conn net.Conn) (b []byte, err error) {
-	l := make([]byte, 2)
-	_, err = conn.Read(l)
+// readPrefixedBuf reads a length-prefixed DNS message from conn into buf,
+// which must be at least 2+dns.MaxMsgSize bytes.  Returns the message bytes
+// (a sub-slice of buf[2:]) without copying.
+func readPrefixedBuf(conn net.Conn, buf []byte) (b []byte, err error) {
+	_, err = io.ReadFull(conn, buf[:2])
 	if err != nil {
 		return nil, fmt.Errorf("reading len: %w", err)
 	}
 
-	packetLen := binary.BigEndian.Uint16(l)
+	packetLen := int(binary.BigEndian.Uint16(buf[:2]))
 	if packetLen > dns.MaxMsgSize {
 		return nil, errTooLarge
 	}
 
-	b = make([]byte, packetLen)
-	_, err = io.ReadFull(conn, b)
+	_, err = io.ReadFull(conn, buf[2:2+packetLen])
 	if err != nil {
 		return nil, fmt.Errorf("reading msg: %w", err)
 	}
 
-	return b, nil
+	return buf[2 : 2+packetLen], nil
 }
 
-// Writes a response to the TCP (or TLS) client
+// respondTCP writes a response to the TCP (or TLS) client.
 func (p *Proxy) respondTCP(d *DNSContext) error {
 	resp := d.Res
 	conn := d.Conn
 
 	if resp == nil {
-		// If no response has been written, close the connection right away
 		return conn.Close()
 	}
 
-	bytes, err := resp.Pack()
+	pb := tcpPackPool.Get().(*[]byte)
+	defer tcpPackPool.Put(pb)
+
+	wire, err := resp.PackBuffer((*pb)[2:])
 	if err != nil {
 		return fmt.Errorf("packing message: %w", err)
 	}
 
-	err = writePrefixed(bytes, conn)
+	msgLen := len(wire)
+	binary.BigEndian.PutUint16((*pb)[:2], uint16(msgLen))
+	_, err = conn.Write((*pb)[:2+msgLen])
 	if err != nil && !errors.Is(err, net.ErrClosed) {
 		return fmt.Errorf("writing message: %w", err)
 	}
 
 	return nil
-}
-
-// writePrefixed writes a DNS message to a TCP connection it first writes
-// a 2-byte prefix followed by the message itself.
-func writePrefixed(b []byte, conn net.Conn) (err error) {
-	l := make([]byte, 2)
-	binary.BigEndian.PutUint16(l, uint16(len(b)))
-	_, err = (&net.Buffers{l, b}).WriteTo(conn)
-
-	return err
 }

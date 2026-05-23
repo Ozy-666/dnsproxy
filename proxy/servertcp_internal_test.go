@@ -4,12 +4,47 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"net"
+	"net/netip"
 	"testing"
 
 	"github.com/AdguardTeam/golibs/testutil/servicetest"
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/require"
 )
+
+func BenchmarkRespondTCP(b *testing.B) {
+	resp := &dns.Msg{}
+	resp.SetReply(&dns.Msg{})
+	resp.Question = []dns.Question{{
+		Name:   "example.com.",
+		Qtype:  dns.TypeA,
+		Qclass: dns.ClassINET,
+	}}
+	resp.Answer = []dns.RR{&dns.A{
+		Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+		A:   net.ParseIP("93.184.216.34").To4(),
+	}}
+
+	d := &DNSContext{
+		Res:   resp,
+		Proto: ProtoTCP,
+		Addr:  netip.MustParseAddrPort("127.0.0.1:12345"),
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		pb := tcpPackPool.Get().(*[]byte)
+		wire, err := resp.PackBuffer((*pb)[2:])
+		if err != nil {
+			b.Fatal(err)
+		}
+		_ = d
+		_ = wire
+		tcpPackPool.Put(pb)
+	}
+}
 
 func TestProxy_tcp(t *testing.T) {
 	dnsProxy := mustStartDefaultProxy(t)

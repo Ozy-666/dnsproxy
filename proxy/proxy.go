@@ -204,7 +204,7 @@ type Proxy struct {
 	rttLock sync.Mutex
 
 	// started indicates if the proxy has been started.
-	started bool
+	started atomic.Bool
 }
 
 // New creates a new Proxy with the specified configuration.  c must not be nil.
@@ -225,8 +225,7 @@ func New(c *Config) (p *Proxy, err error) {
 		),
 		requestHandler:   cmp.Or[Handler](c.RequestHandler, DefaultHandler{}),
 		upstreamRTTStats: map[string]upstreamRTTStats{},
-		rttLock:          sync.Mutex{},
-		RWMutex:          sync.RWMutex{},
+		rttLock: sync.Mutex{},
 		// 2 bytes may be used to store packet length (see TCP/TLS).
 		bytesPool:  syncutil.NewSlicePool[byte](2 + dns.MaxMsgSize),
 		udpOOBSize: proxynetutil.UDPGetOOBSize(),
@@ -313,10 +312,7 @@ func (p *Proxy) validateBasicAuth() (err error) {
 
 // Returns true if proxy is started.  It is safe for concurrent use.
 func (p *Proxy) isStarted() (ok bool) {
-	p.RLock()
-	defer p.RUnlock()
-
-	return p.started
+	return p.started.Load()
 }
 
 // type check
@@ -329,7 +325,7 @@ func (p *Proxy) Start(ctx context.Context) (err error) {
 	p.Lock()
 	defer p.Unlock()
 
-	if p.started {
+	if p.started.Load() {
 		return errors.Error("server has been already started")
 	}
 
@@ -350,7 +346,7 @@ func (p *Proxy) Start(ctx context.Context) (err error) {
 	// canceled.
 	p.serveListeners(context.WithoutCancel(ctx))
 
-	p.started = true
+	p.started.Store(true)
 
 	return nil
 }
@@ -383,7 +379,7 @@ func (p *Proxy) Shutdown(ctx context.Context) (err error) {
 	p.Lock()
 	defer p.Unlock()
 
-	if !p.started {
+	if !p.started.Load() {
 		// TODO(a.garipov): Consider returning err.
 		p.logger.WarnContext(ctx, "dns proxy server is not started")
 
@@ -402,7 +398,7 @@ func (p *Proxy) Shutdown(ctx context.Context) (err error) {
 		}
 	}
 
-	p.started = false
+	p.started.Store(false)
 
 	p.logger.InfoContext(ctx, "stopped dns proxy server")
 
