@@ -163,10 +163,12 @@ type Proxy struct {
 	// dnsCryptTCPListen are the listened TCP connections for DNSCrypt.
 	dnsCryptTCPListen []net.Listener
 
-	// upstreamRTTStats maps the upstream address to its round-trip time
-	// statistics.  It's holds the statistics for all upstreams to perform a
-	// weighted random selection when using the load balancing mode.
-	upstreamRTTStats map[string]upstreamRTTStats
+	// rttStats holds a consistent snapshot of per-upstream RTT statistics.
+	// Reads are lock-free (atomic load).  Writes use copy-on-write under rttMu.
+	rttStats atomic.Pointer[map[string]upstreamRTTStats]
+
+	// rttMu serializes concurrent writers to rttStats.
+	rttMu sync.Mutex
 
 	// dns64Prefs is a set of NAT64 prefixes that are used to detect and
 	// construct DNS64 responses.  The DNS64 function is disabled if it is
@@ -198,11 +200,6 @@ type Proxy struct {
 	// Also make it a pointer.
 	sync.RWMutex
 
-	// rttLock protects upstreamRTTStats.
-	//
-	// TODO(e.burkov):  Make it a pointer.
-	rttLock sync.Mutex
-
 	// started indicates if the proxy has been started.
 	started atomic.Bool
 }
@@ -223,9 +220,7 @@ func New(c *Config) (p *Proxy, err error) {
 			c.RequestContext,
 			contextutil.EmptyConstructor{},
 		),
-		requestHandler:   cmp.Or[Handler](c.RequestHandler, DefaultHandler{}),
-		upstreamRTTStats: map[string]upstreamRTTStats{},
-		rttLock: sync.Mutex{},
+		requestHandler: cmp.Or[Handler](c.RequestHandler, DefaultHandler{}),
 		// 2 bytes may be used to store packet length (see TCP/TLS).
 		bytesPool:  syncutil.NewSlicePool[byte](2 + dns.MaxMsgSize),
 		udpOOBSize: proxynetutil.UDPGetOOBSize(),
@@ -236,8 +231,11 @@ func New(c *Config) (p *Proxy, err error) {
 		),
 		recDetector:     newRecursionDetector(recursionTTL, cachedRecurrentReqNum),
 		pendingRequests: pendingRequestsOrDefault(c.PendingRequests),
-		logger:          loggerOrDefault(c.Logger),
+		logger: loggerOrDefault(c.Logger),
 	}
+
+	emptyRTT := map[string]upstreamRTTStats{}
+	p.rttStats.Store(&emptyRTT)
 
 	// TODO(e.burkov):  Validate config separately and add the contract to the
 	// New function.

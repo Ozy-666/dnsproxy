@@ -50,6 +50,30 @@ TCP keepalive iteration.  Under a `Shutdown()` call, the pending write-lock
 caused all concurrent `RLock()` callers to queue behind it — a thundering-herd
 unblock on restart.  Now a single `p.started.Load()` with no lock.
 
+### Lock-Free Upstream RTT Statistics (Copy-on-Write)
+
+`proxy/proxy.go` + `proxy/exchange.go` — `upstreamRTTStats map[string]upstreamRTTStats`
+and its `rttLock sync.Mutex` are replaced with `rttStats atomic.Pointer[map[string]upstreamRTTStats]`
+and a narrow `rttMu sync.Mutex` used only by writers.
+
+**Before:** `calcWeights()` (called on every load-balanced query) acquired an
+exclusive `sync.Mutex` to *read* the stats map — serializing all concurrent
+goroutines at the dispatch point.  `updateRTT()` (called after every upstream
+response) acquired the same lock to write a single entry.
+
+**After:**
+- `calcWeights()` calls `p.rttStats.Load()` — a single atomic pointer read,
+  zero contention, no lock.  The returned snapshot is consistent for the
+  duration of the weight calculation.
+- `updateRTT()` holds `rttMu` only for the write: loads the current snapshot,
+  shallow-copies the map (typically 2–3 entries), updates one entry, and stores
+  the new pointer.  Readers see either the old or the new snapshot atomically —
+  never a partially-written map.
+
+The shallow copy is proportional to the number of configured upstreams (our
+production config: 2–3 entries), making the write path negligible.  All 5
+sub-cases of `TestProxy_Exchange_loadBalance` pass with `-race` enabled.
+
 ## Versioning
 
 We maintain specific `-edge` tags based on upstream stable releases.

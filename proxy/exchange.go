@@ -129,11 +129,9 @@ func (stats upstreamRTTStats) update(rtt time.Duration) (updated upstreamRTTStat
 func (p *Proxy) calcWeights(ups []upstream.Upstream) (weights []float64) {
 	weights = make([]float64, 0, len(ups))
 
-	p.rttLock.Lock()
-	defer p.rttLock.Unlock()
-
+	stats := *p.rttStats.Load()
 	for _, u := range ups {
-		stat := p.upstreamRTTStats[u.Address()]
+		stat := stats[u.Address()]
 		if stat.rttSum == 0 || stat.reqNum == 0 {
 			// Use 1 as the default weight.
 			weights = append(weights, 1)
@@ -148,12 +146,14 @@ func (p *Proxy) calcWeights(ups []upstream.Upstream) (weights []float64) {
 // updateRTT updates the round-trip time in [upstreamRTTStats] for given
 // address.
 func (p *Proxy) updateRTT(address string, rtt time.Duration) {
-	p.rttLock.Lock()
-	defer p.rttLock.Unlock()
+	p.rttMu.Lock()
+	defer p.rttMu.Unlock()
 
-	if p.upstreamRTTStats == nil {
-		p.upstreamRTTStats = map[string]upstreamRTTStats{}
+	old := *p.rttStats.Load()
+	newMap := make(map[string]upstreamRTTStats, len(old))
+	for k, v := range old {
+		newMap[k] = v
 	}
-
-	p.upstreamRTTStats[address] = p.upstreamRTTStats[address].update(rtt)
+	newMap[address] = old[address].update(rtt)
+	p.rttStats.Store(&newMap)
 }
