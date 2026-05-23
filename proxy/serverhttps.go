@@ -159,12 +159,17 @@ func newDoHReq(
 			return nil, http.StatusUnsupportedMediaType
 		}
 
-		// TODO(d.kolyshev): Limit reader.
-		buf, err = io.ReadAll(r.Body)
+		buf, err = io.ReadAll(io.LimitReader(r.Body, dns.MaxMsgSize+1))
 		if err != nil {
 			l.DebugContext(ctx, "reading http request body", slogutil.KeyError, err)
 
 			return nil, http.StatusBadRequest
+		}
+
+		if len(buf) > dns.MaxMsgSize {
+			l.DebugContext(ctx, "request body too large", "size", len(buf))
+
+			return nil, http.StatusRequestEntityTooLarge
 		}
 
 		defer slogutil.CloseAndLog(ctx, l, r.Body, slog.LevelDebug)
