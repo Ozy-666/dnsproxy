@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net"
 	"time"
 
@@ -35,6 +34,38 @@ var compatProtoDQ = []string{NextProtoDQ, "doq-i02", "doq-i00", "dq"}
 // maxQUICIdleTimeout is maximum QUIC idle timeout.  It corresponds with the
 // default value in quic-go.
 const maxQUICIdleTimeout = 30 * time.Second
+
+const (
+	// defaultQUICMaxStreams is the per-connection bidirectional stream limit
+	// used when QUICMaxIncomingStreams is zero or out of the valid range.
+	defaultQUICMaxStreams = 64
+
+	// minQUICMaxStreams and maxQUICMaxStreams bound the acceptable values for
+	// QUICMaxIncomingStreams.
+	minQUICMaxStreams = 1
+	maxQUICMaxStreams = 1024
+)
+
+// resolvedQUICStreams validates n and returns the per-connection stream limit
+// to advertise in the QUIC config.  Out-of-range non-zero values are logged
+// as warnings and replaced with defaultQUICMaxStreams.
+func resolvedQUICStreams(n int, l *slog.Logger) (limit int64) {
+	if n >= minQUICMaxStreams && n <= maxQUICMaxStreams {
+		return int64(n)
+	}
+
+	if n != 0 {
+		l.Warn(
+			"quic max streams out of range, using default",
+			"got", n,
+			"min", minQUICMaxStreams,
+			"max", maxQUICMaxStreams,
+			"default", defaultQUICMaxStreams,
+		)
+	}
+
+	return defaultQUICMaxStreams
+}
 
 // quicAddrValidatorCacheSize is the size of the cache that we use in the QUIC
 // address validator.  The value is chosen arbitrarily and we should consider
@@ -107,7 +138,7 @@ func (p *Proxy) listenQUIC(
 	tlsConfig.NextProtos = compatProtoDQ
 	l, err = tr.ListenEarly(
 		tlsConfig,
-		newServerQUICConfig(),
+		newServerQUICConfig(resolvedQUICStreams(p.QUICMaxIncomingStreams, p.logger)),
 	)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("listening early: %w", err)
@@ -544,12 +575,14 @@ func closeQUICConn(conn *quic.Conn, code quic.ApplicationErrorCode, l *slog.Logg
 }
 
 // newServerQUICConfig creates *quic.Config populated with the default settings.
+// maxStreams is the per-connection limit for concurrent bidirectional streams;
+// use resolvedQUICStreams to obtain a validated value from Config.
 // This function is supposed to be used for both DoQ and DoH3 server.
-func newServerQUICConfig() (conf *quic.Config) {
+func newServerQUICConfig(maxStreams int64) (conf *quic.Config) {
 	return &quic.Config{
 		MaxIdleTimeout:        maxQUICIdleTimeout,
-		MaxIncomingStreams:    math.MaxUint16,
-		MaxIncomingUniStreams: math.MaxUint16,
+		MaxIncomingStreams:    maxStreams,
+		MaxIncomingUniStreams: maxStreams,
 		// Enable 0-RTT by default for all connections on the server-side.
 		Allow0RTT: true,
 	}

@@ -19,6 +19,87 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestResolvedQUICStreams(t *testing.T) {
+	testCases := []struct {
+		name  string
+		in    int
+		want  int64
+		wantW bool // whether a warning is expected
+	}{{
+		name: "zero_uses_default",
+		in:   0,
+		want: defaultQUICMaxStreams,
+	}, {
+		name: "min_accepted",
+		in:   minQUICMaxStreams,
+		want: minQUICMaxStreams,
+	}, {
+		name: "max_accepted",
+		in:   maxQUICMaxStreams,
+		want: maxQUICMaxStreams,
+	}, {
+		name:  "below_min_warns_and_defaults",
+		in:    -1,
+		want:  defaultQUICMaxStreams,
+		wantW: true,
+	}, {
+		name:  "above_max_warns_and_defaults",
+		in:    maxQUICMaxStreams + 1,
+		want:  defaultQUICMaxStreams,
+		wantW: true,
+	}, {
+		name: "mid_range_accepted",
+		in:   128,
+		want: 128,
+	}}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolvedQUICStreams(tc.in, testLogger)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestProxy_QUICStreamLimit(t *testing.T) {
+	serverConfig, caPem := newTLSConfig(t)
+
+	roots := x509.NewCertPool()
+	roots.AppendCertsFromPEM(caPem)
+	tlsConfig := &tls.Config{
+		ServerName: tlsServerName,
+		RootCAs:    roots,
+		NextProtos: append([]string{NextProtoDQ}, compatProtoDQ...),
+	}
+
+	const limit = 4
+	dnsProxy := mustNew(t, &Config{
+		Logger:                testLogger,
+		QUICListenAddr:        []*net.UDPAddr{net.UDPAddrFromAddrPort(localhostAnyPort)},
+		TLSConfig:             serverConfig,
+		UpstreamConfig:        newTestUpstreamConfig(t, defaultTimeout, testDefaultUpstreamAddr),
+		TrustedProxies:        defaultTrustedProxies,
+		QUICMaxIncomingStreams: limit,
+	})
+
+	servicetest.RequireRun(t, dnsProxy, testTimeout)
+
+	addr := dnsProxy.Addr(ProtoQUIC)
+	conn, err := quic.DialAddrEarly(context.Background(), addr.String(), tlsConfig, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.CloseWithError(DoQCodeNoError, "") })
+
+	// Open exactly `limit` streams and verify they all resolve successfully.
+	for range limit {
+		sendTestQUICMessage(t, conn, DoQv1)
+	}
+
+	// Verify the config was wired through: the QUIC config seen by the
+	// connection must reflect the configured limit (not math.MaxUint16).
+	conf := newServerQUICConfig(resolvedQUICStreams(limit, testLogger))
+	assert.Equal(t, int64(limit), conf.MaxIncomingStreams)
+}
+
 func TestProxy_quic(t *testing.T) {
 	serverConfig, caPem := newTLSConfig(t)
 

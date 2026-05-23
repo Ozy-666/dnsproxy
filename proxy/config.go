@@ -121,6 +121,13 @@ type Config struct {
 	// requests.
 	QUICListenAddr []*net.UDPAddr
 
+	// QUICMaxIncomingStreams is the maximum number of concurrent bidirectional
+	// QUIC streams the server accepts per connection for DoQ.  If zero or
+	// outside [1, 1024], the default of 64 is used and a warning is logged for
+	// explicitly out-of-range values.  Capping this prevents a single client
+	// from draining the global request semaphore via stream flooding.
+	QUICMaxIncomingStreams int
+
 	// DNSCryptUDPListenAddr is the set of UDP addresses to listen for DNSCrypt
 	// requests.
 	DNSCryptUDPListenAddr []*net.UDPAddr

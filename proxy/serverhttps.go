@@ -63,7 +63,7 @@ func (p *Proxy) listenH3(
 ) (ln *quic.EarlyListener, err error) {
 	tlsConfig := p.TLSConfig.Clone()
 	tlsConfig.NextProtos = []string{"h3"}
-	quicListen, err := quic.ListenAddrEarly(addr.String(), tlsConfig, newServerQUICConfig())
+	quicListen, err := quic.ListenAddrEarly(addr.String(), tlsConfig, newServerQUICConfig(resolvedQUICStreams(p.QUICMaxIncomingStreams, p.logger)))
 	if err != nil {
 		return nil, fmt.Errorf("quic listener: %w", err)
 	}
