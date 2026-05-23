@@ -97,6 +97,11 @@ the validated value.  QUIC flow control (`MAX_STREAMS` frame) now rejects
 excess streams at the transport layer — no goroutine is ever spawned for
 a stream beyond the limit.
 
+**AdGuardHome-Edge wiring:** `QUICMaxIncomingStreams` is exposed in
+`AdGuardHome.yaml` under `dns.quic_max_incoming_streams` (schema v35,
+`internal/dnsforward/config.go`).  Default is 64.  Leave unset or set to 0
+to get the default silently; set to a value in `[1, 1024]` to override.
+
 ### Bounded DoH POST Body
 
 `proxy/serverhttps.go` — the `newDoHReq` handler previously called
