@@ -74,6 +74,20 @@ The shallow copy is proportional to the number of configured upstreams (our
 production config: 2–3 entries), making the write path negligible.  All 5
 sub-cases of `TestProxy_Exchange_loadBalance` pass with `-race` enabled.
 
+### Bounded DoH POST Body
+
+`proxy/serverhttps.go` — the `newDoHReq` handler previously called
+`io.ReadAll(r.Body)` with no upper bound, acknowledged by an in-tree
+`TODO(d.kolyshev): Limit reader.` that was never resolved upstream.
+
+Under a POST flood, each goroutine would allocate memory proportional to the
+POST body length until the HTTP `ReadTimeout` fired, causing GC pressure spikes.
+
+Fix: `io.LimitReader(r.Body, dns.MaxMsgSize+1)` caps the read at 65536 bytes.
+If the body exceeds `dns.MaxMsgSize` (65535 bytes — the DNS wire-format maximum
+per RFC 8484 §4.1), the handler returns `413 Request Entity Too Large` before
+calling `Unpack`.  Any legitimate DoH request fits in 64 KB.
+
 ## Versioning
 
 We maintain specific `-edge` tags based on upstream stable releases.
