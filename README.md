@@ -74,6 +74,29 @@ The shallow copy is proportional to the number of configured upstreams (our
 production config: 2–3 entries), making the write path negligible.  All 5
 sub-cases of `TestProxy_Exchange_loadBalance` pass with `-race` enabled.
 
+### Configurable QUIC Stream Limit (Finding 9.2)
+
+`proxy/config.go` + `proxy/serverquic.go` — `newServerQUICConfig()` previously
+set `MaxIncomingStreams: math.MaxUint16` (65535) for both DoQ and DoH3.  A
+single QUIC client could open 65535 concurrent streams per connection, each
+spawning a goroutine and consuming a slot from the global `requestsSema`,
+starving all other clients and protocols.
+
+**New field:** `QUICMaxIncomingStreams int` in `Config`.
+
+**Validation (`resolvedQUICStreams`):**
+
+| Input | Behaviour |
+|---|---|
+| `0` (unset) | Default 64, no log |
+| `[1, 1024]` | Used as-is |
+| Outside range, non-zero | Warn log + default 64 |
+
+Both the DoQ listener (`listenQUIC`) and the DoH3 listener (`listenH3`) use
+the validated value.  QUIC flow control (`MAX_STREAMS` frame) now rejects
+excess streams at the transport layer — no goroutine is ever spawned for
+a stream beyond the limit.
+
 ### Bounded DoH POST Body
 
 `proxy/serverhttps.go` — the `newDoHReq` handler previously called
