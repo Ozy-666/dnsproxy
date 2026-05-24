@@ -133,6 +133,7 @@ the `edge-udp-pool` branch.
 | `0b14b22` | `rttLock` mutex → `atomic.Pointer` CoW map (lock-free RTT reads) |
 | `00fc061` | DoH POST body bounded to `dns.MaxMsgSize` via `io.LimitReader` |
 | `716e780` | `QUICMaxIncomingStreams` configurable field, default 64, range [1,1024] |
+| `f9ab1de` | `MaxIncomingUniStreams` decoupled from the bidi cap (fixed 64) so a low DoQ limit can't break DoH3 control/QPACK streams |
 
 The fork module path remains `github.com/AdguardTeam/dnsproxy` (unchanged from
 upstream) so it integrates via a `go.mod replace` directive in the host repo:
