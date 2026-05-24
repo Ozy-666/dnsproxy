@@ -4,7 +4,7 @@ This is a custom, performance-optimized fork of the original [AdguardTeam/dnspro
 
 ## Purpose
 
-Maintained specifically for the `AdGuardHome-edge` project.  All changes target
+Maintained specifically for the [AdGuardHome-edge](https://github.com/Ozy-666/AdGuardHome-edge-spec) project.  All changes target
 the hot DNS query path and are benchmarked on the production host before
 deployment.
 
