@@ -44,6 +44,14 @@ const (
 	// QUICMaxIncomingStreams.
 	minQUICMaxStreams = 1
 	maxQUICMaxStreams = 1024
+
+	// serverQUICUniStreams caps client-initiated unidirectional QUIC streams.
+	// DoQ does not use them; HTTP/3 (DoH3) requires a few — a control stream
+	// plus the QPACK encoder and decoder streams, at least three per RFC 9114.
+	// This is intentionally decoupled from the configurable bidirectional limit
+	// (the DoQ flood-control knob) so that a low QUICMaxIncomingStreams cannot
+	// starve DoH3 of its mandatory control and QPACK streams.
+	serverQUICUniStreams = 64
 )
 
 // resolvedQUICStreams validates n and returns the per-connection stream limit
@@ -576,13 +584,16 @@ func closeQUICConn(conn *quic.Conn, code quic.ApplicationErrorCode, l *slog.Logg
 
 // newServerQUICConfig creates *quic.Config populated with the default settings.
 // maxStreams is the per-connection limit for concurrent bidirectional streams;
-// use resolvedQUICStreams to obtain a validated value from Config.
-// This function is supposed to be used for both DoQ and DoH3 server.
+// use resolvedQUICStreams to obtain a validated value from Config.  The
+// unidirectional limit is fixed at serverQUICUniStreams and not tied to
+// maxStreams, so capping DoQ query concurrency cannot break DoH3's control and
+// QPACK streams.  This function is supposed to be used for both DoQ and DoH3
+// server.
 func newServerQUICConfig(maxStreams int64) (conf *quic.Config) {
 	return &quic.Config{
 		MaxIdleTimeout:        maxQUICIdleTimeout,
 		MaxIncomingStreams:    maxStreams,
-		MaxIncomingUniStreams: maxStreams,
+		MaxIncomingUniStreams: serverQUICUniStreams,
 		// Enable 0-RTT by default for all connections on the server-side.
 		Allow0RTT: true,
 	}

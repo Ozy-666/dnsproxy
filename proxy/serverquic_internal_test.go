@@ -98,6 +98,12 @@ func TestProxy_QUICStreamLimit(t *testing.T) {
 	// connection must reflect the configured limit (not math.MaxUint16).
 	conf := newServerQUICConfig(resolvedQUICStreams(limit, testLogger))
 	assert.Equal(t, int64(limit), conf.MaxIncomingStreams)
+
+	// W1: the unidirectional limit must be decoupled from the bidirectional
+	// flood-control cap so a low limit cannot starve DoH3's control/QPACK
+	// streams (>=3 per RFC 9114).
+	assert.Equal(t, int64(serverQUICUniStreams), conf.MaxIncomingUniStreams)
+	assert.NotEqual(t, conf.MaxIncomingStreams, conf.MaxIncomingUniStreams)
 }
 
 func TestProxy_quic(t *testing.T) {
