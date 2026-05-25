@@ -33,6 +33,10 @@ correctness risk.
   sub-slice of the pool buffer returned after `Unpack`.
 - **Write**: `resp.PackBuffer((*pb)[2:])` packs into the pool slot; length
   prefix written into `(*pb)[0:2]`; entire frame sent via a single `conn.Write`.
+  A `msgLen > dns.MaxMsgSize` guard precedes the prefix write: an oversized
+  response cannot fit the pool slot (PackBuffer would allocate `wire` outside
+  `*pb`), so the frame is refused with `errTooLarge` rather than truncating the
+  uint16 prefix and slicing `(*pb)` out of bounds.
 
 Net result: 4 heap allocs per TCP round-trip → **0**.  Brings TCP/DoT to
 performance parity with UDP.
@@ -134,6 +138,7 @@ the `edge-udp-pool` branch.
 | `00fc061` | DoH POST body bounded to `dns.MaxMsgSize` via `io.LimitReader` |
 | `716e780` | `QUICMaxIncomingStreams` configurable field, default 64, range [1,1024] |
 | `f9ab1de` | `MaxIncomingUniStreams` decoupled from the bidi cap (fixed 64) so a low DoQ limit can't break DoH3 control/QPACK streams |
+| `4728330` | `respondTCP` oversized-response guard (`msgLen > dns.MaxMsgSize` → `errTooLarge`); closes uint16 prefix truncation + out-of-bounds reslice panic (audit H2) |
 
 The fork module path remains `github.com/AdguardTeam/dnsproxy` (unchanged from
 upstream) so it integrates via a `go.mod replace` directive in the host repo:
