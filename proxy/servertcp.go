@@ -237,6 +237,14 @@ func (p *Proxy) respondTCP(d *DNSContext) error {
 	}
 
 	msgLen := len(wire)
+	if msgLen > dns.MaxMsgSize {
+		// The 2-byte TCP length prefix cannot encode a message larger than
+		// dns.MaxMsgSize, and PackBuffer may have allocated wire outside the
+		// pooled buffer.  Refuse rather than truncate the prefix and slice
+		// (*pb) out of bounds.
+		return errTooLarge
+	}
+
 	binary.BigEndian.PutUint16((*pb)[:2], uint16(msgLen))
 	_, err = conn.Write((*pb)[:2+msgLen])
 	if err != nil && !errors.Is(err, net.ErrClosed) {
