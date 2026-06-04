@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AdguardTeam/dnsproxy/internal/bootstrap"
@@ -15,6 +17,20 @@ import (
 	"github.com/AdguardTeam/golibs/logutil/slogutil"
 	"github.com/miekg/dns"
 )
+
+// plainPoolEnabled reports whether plain (UDP/TCP) upstream connections are
+// pooled and reused across exchanges instead of dialed-and-closed per query.
+// It is on by default and disabled by DNSPROXY_PLAIN_POOL=0, restoring the
+// original dial-per-query behaviour.  Reused connections eliminate the per-query
+// socket/connect/close syscalls — the dominant CPU cost when the resolver
+// forwards every query to a local upstream (e.g. an on-box unbound).
+var plainPoolEnabled = os.Getenv("DNSPROXY_PLAIN_POOL") != "0"
+
+// maxIdlePlainConns bounds the idle connections retained per network for a
+// single plain upstream.  Connections returned when the pool is full are
+// closed.  Sized to cover realistic concurrent in-flight query counts so the
+// steady state reuses connections rather than dialing.
+const maxIdlePlainConns = 1024
 
 // network is the semantic type alias of the network to pass to dialing
 // functions.  It's either [networkUDP] or [networkTCP].  It may also be used as
@@ -46,6 +62,18 @@ type plainDNS struct {
 
 	// timeout is the timeout for DNS requests.
 	timeout time.Duration
+
+	// poolMu guards idleUDP and idleTCP.
+	poolMu sync.Mutex
+
+	// idleUDP and idleTCP are LIFO stacks of idle connections available for
+	// reuse, kept separate because a single upstream may be exchanged with over
+	// either network (TCP fallback on truncation).  A connection is removed
+	// from its stack for the exclusive duration of an exchange and returned
+	// only after a successful, validated response, so it is never shared
+	// concurrently — which would let DNS responses cross-talk between queries.
+	idleUDP []net.Conn
+	idleTCP []net.Conn
 }
 
 // newPlain returns the plain DNS Upstream.  addr.Scheme should be either "udp"
@@ -84,8 +112,59 @@ func (p *plainDNS) Address() string {
 	}
 }
 
-// dialExchange performs a DNS exchange with the specified dial handler.
-// network must be either [networkUDP] or [networkTCP].
+// idleStack returns a pointer to the idle-connection stack for network.
+// p.poolMu must be held.
+func (p *plainDNS) idleStack(network network) *[]net.Conn {
+	if network == networkUDP {
+		return &p.idleUDP
+	}
+
+	return &p.idleTCP
+}
+
+// getIdle returns a pooled idle connection for network, or nil if none is
+// available.  The returned connection is owned exclusively by the caller until
+// putIdle or Close.
+func (p *plainDNS) getIdle(network network) (c net.Conn) {
+	if !plainPoolEnabled {
+		return nil
+	}
+
+	p.poolMu.Lock()
+	defer p.poolMu.Unlock()
+
+	st := p.idleStack(network)
+	if n := len(*st); n > 0 {
+		c = (*st)[n-1]
+		(*st)[n-1] = nil
+		*st = (*st)[:n-1]
+	}
+
+	return c
+}
+
+// putIdle returns a healthy connection to the pool for reuse, or closes it when
+// pooling is disabled or the pool is full.
+func (p *plainDNS) putIdle(network network, c net.Conn) {
+	if plainPoolEnabled {
+		p.poolMu.Lock()
+		st := p.idleStack(network)
+		if len(*st) < maxIdlePlainConns {
+			*st = append(*st, c)
+			p.poolMu.Unlock()
+
+			return
+		}
+		p.poolMu.Unlock()
+	}
+
+	_ = c.Close()
+}
+
+// dialExchange performs a DNS exchange with the specified dial handler, reusing
+// a pooled connection when one is available and returning it to the pool on a
+// clean, validated response.  network must be either [networkUDP] or
+// [networkTCP].
 func (p *plainDNS) dialExchange(
 	network network,
 	dial bootstrap.DialHandler,
@@ -106,28 +185,50 @@ func (p *plainDNS) dialExchange(
 	defer func() { logFinish(p.logger, addr, network, err) }()
 
 	ctx := context.Background()
-	conn.Conn, err = dial(ctx, network, "")
-	if err != nil {
-		return nil, fmt.Errorf("dialing %s over %s: %w", p.addr.Host, network, err)
+
+	// Try a pooled connection first; fall back to dialing a fresh one.
+	conn.Conn = p.getIdle(network)
+	fromPool := conn.Conn != nil
+	if !fromPool {
+		conn.Conn, err = dial(ctx, network, "")
+		if err != nil {
+			return nil, fmt.Errorf("dialing %s over %s: %w", p.addr.Host, network, err)
+		}
 	}
-	defer func(c net.Conn) { err = errors.WithDeferred(err, c.Close()) }(conn.Conn)
 
 	resp, _, err = client.ExchangeWithConn(upstreamReq, conn)
-	if isExpectedConnErr(err) {
+	if err != nil && (fromPool || isExpectedConnErr(err)) {
+		// A pooled connection may have gone stale (e.g. the upstream restarted
+		// or closed an idle keep-alive), and a freshly-dialed one may hit an
+		// expected transient error.  Discard it and retry once with a fresh
+		// dial.
+		_ = conn.Conn.Close()
+
 		conn.Conn, err = dial(ctx, network, "")
 		if err != nil {
 			return nil, fmt.Errorf("dialing %s over %s again: %w", p.addr.Host, network, err)
 		}
-		defer func(c net.Conn) { err = errors.WithDeferred(err, c.Close()) }(conn.Conn)
 
 		resp, _, err = client.ExchangeWithConn(upstreamReq, conn)
 	}
 
 	if err != nil {
+		_ = conn.Conn.Close()
+
 		return resp, fmt.Errorf("exchanging with %s over %s: %w", addr, network, err)
 	}
 
-	return resp, validatePlainResponse(upstreamReq, resp)
+	err = validatePlainResponse(upstreamReq, resp)
+	if err != nil {
+		// Don't pool a connection that produced an invalid response.
+		_ = conn.Conn.Close()
+
+		return resp, err
+	}
+
+	p.putIdle(network, conn.Conn)
+
+	return resp, nil
 }
 
 // setRequestForNetwork sets connection options in conn and overrides the
@@ -207,7 +308,20 @@ func (p *plainDNS) Exchange(req *dns.Msg) (resp *dns.Msg, err error) {
 
 // Close implements the [Upstream] interface for *plainDNS.
 func (p *plainDNS) Close() (err error) {
-	return nil
+	p.poolMu.Lock()
+	defer p.poolMu.Unlock()
+
+	var errs []error
+	for _, st := range []*[]net.Conn{&p.idleUDP, &p.idleTCP} {
+		for _, c := range *st {
+			if cerr := c.Close(); cerr != nil {
+				errs = append(errs, cerr)
+			}
+		}
+		*st = nil
+	}
+
+	return errors.Join(errs...)
 }
 
 // errQuestion is returned when a message has malformed question section.

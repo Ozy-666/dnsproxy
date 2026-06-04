@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -140,6 +141,93 @@ func TestUpstream_plainDNS_fallbackToTCP(t *testing.T) {
 			assert.Equal(t, tc.wantTCP, int(tcpReqNum.Load()))
 		})
 	}
+}
+
+func TestUpstream_plainDNS_connPool(t *testing.T) {
+	var mu sync.Mutex
+	remotes := map[string]struct{}{}
+	srv := startDNSServer(t, func(w dns.ResponseWriter, req *dns.Msg) {
+		mu.Lock()
+		remotes[w.RemoteAddr().String()] = struct{}{}
+		mu.Unlock()
+
+		require.NoError(testutil.PanicT{}, w.WriteMsg(respondToTestMessage(req)))
+	})
+	testutil.CleanupAndRequireSuccess(t, srv.Close)
+
+	addr := fmt.Sprintf("127.0.0.1:%d", srv.port)
+
+	t.Run("reuse_sequential", func(t *testing.T) {
+		mu.Lock()
+		clear(remotes)
+		mu.Unlock()
+
+		u, err := AddressToUpstream(addr, &Options{Logger: testLogger})
+		require.NoError(t, err)
+		testutil.CleanupAndRequireSuccess(t, u.Close)
+
+		for range 20 {
+			checkUpstream(t, u, addr)
+		}
+
+		mu.Lock()
+		n := len(remotes)
+		mu.Unlock()
+
+		// With pooling, every sequential exchange reuses the one connection, so
+		// the server sees a single client source address.
+		assert.Equal(t, 1, n)
+	})
+
+	t.Run("disabled_dials_each", func(t *testing.T) {
+		defer func(v bool) { plainPoolEnabled = v }(plainPoolEnabled)
+		plainPoolEnabled = false
+
+		mu.Lock()
+		clear(remotes)
+		mu.Unlock()
+
+		u, err := AddressToUpstream(addr, &Options{Logger: testLogger})
+		require.NoError(t, err)
+		testutil.CleanupAndRequireSuccess(t, u.Close)
+
+		for range 10 {
+			checkUpstream(t, u, addr)
+		}
+
+		mu.Lock()
+		n := len(remotes)
+		mu.Unlock()
+
+		// Without pooling each exchange dials and closes a fresh socket, so the
+		// server sees more than one client source address.
+		assert.Greater(t, n, 1)
+	})
+
+	t.Run("concurrent_correct", func(t *testing.T) {
+		u, err := AddressToUpstream(addr, &Options{Logger: testLogger})
+		require.NoError(t, err)
+		testutil.CleanupAndRequireSuccess(t, u.Close)
+
+		const workers, perWorker = 16, 50
+		wg := &sync.WaitGroup{}
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+
+				for range perWorker {
+					req := createTestMessage()
+					resp, exErr := u.Exchange(req)
+					assert.NoError(t, exErr)
+					if exErr == nil {
+						requireResponse(t, req, resp)
+					}
+				}
+			}()
+		}
+		wg.Wait()
+	})
 }
 
 // testDNSServer is a simple DNS server that can be used in unit-tests.
