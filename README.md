@@ -120,6 +120,47 @@ If the body exceeds `dns.MaxMsgSize` (65535 bytes — the DNS wire-format maximu
 per RFC 8484 §4.1), the handler returns `413 Request Entity Too Large` before
 calling `Unpack`.  Any legitimate DoH request fits in 64 KB.
 
+### Plain Upstream Connection Pooling
+
+`upstream/plain.go` — `plainDNS.dialExchange` dialed a fresh connection and
+closed it on **every** exchange.  When the host resolver forwards every query to
+a local upstream (the AdGuardHome-Edge deployment runs with AGH's own cache
+disabled and delegates caching to an on-box unbound at `127.0.0.1:5353`), a CPU
+profile under a DoT flood — taken *after* the AGH-layer lock contention was
+removed, leaving the resolver network-IO bound — showed `net.Dialer.DialContext`
+at **~19% of all CPU**: pure per-query `socket`/`connect`/`close` syscall
+overhead, the single largest avoidable cost remaining.
+
+**Fix.** A per-upstream, per-network LIFO connection pool (`idleUDP`/`idleTCP`).
+A connection is removed from the pool for the **exclusive** duration of one
+exchange (write + read) and returned only after a clean, validated response —
+never shared concurrently, which would let DNS responses cross-talk between
+in-flight queries (a pooled UDP socket read could return another goroutine's
+reply).  A pooled connection that errors (stale: upstream restart or idle
+keep-alive close) is discarded and the exchange retried once with a fresh dial,
+folding in the existing `isExpectedConnErr` retry.  The pool is bounded
+(`maxIdlePlainConns = 1024` per network; overflow connections are closed on
+return) and drained on `Close`.
+
+Feature-flagged: `DNSPROXY_PLAIN_POOL=0` restores the original dial-per-query
+behaviour.
+
+**Result (A/B, identical DoT loopback ramp, deployed AGH-Edge host):**
+
+| concurrency | answers/s before | answers/s after | Δ |
+|---|---|---|---|
+| c=100 | 10,672 | 14,975 | **+40%** |
+| c=200 | 7,319 | 11,110 | **+52%** |
+| c=400 | 4,775 | 9,605 | **+101%** |
+| c=600 | 3,196 | 6,126 | **+92%** |
+
+Re-profiled, `DialContext` is gone and total CPU *fell* (245% → 216%) while
+throughput roughly doubled — the per-query dial was a blocking `connect()`
+serialization, not merely CPU.  Connection-count sampling confirmed the upstream
+sockets plateau at a bounded count per concurrency level and are reused, instead
+of churning thousands of dials per second.  The remaining CPU is genuine work:
+the downstream TLS response write and the upstream exchange.
+
 ## Versioning
 
 The fork is based on upstream stable releases and extended with edge commits on
@@ -139,6 +180,7 @@ the `edge-udp-pool` branch.
 | `716e780` | `QUICMaxIncomingStreams` configurable field, default 64, range [1,1024] |
 | `f9ab1de` | `MaxIncomingUniStreams` decoupled from the bidi cap (fixed 64) so a low DoQ limit can't break DoH3 control/QPACK streams |
 | `4728330` | `respondTCP` oversized-response guard (`msgLen > dns.MaxMsgSize` → `errTooLarge`); closes uint16 prefix truncation + out-of-bounds reslice panic (audit H2) |
+| `7363632` | Plain UDP/TCP upstream **connection pool** (reuse instead of dial-per-query); eliminates ~19% per-query `connect()` CPU; goodput ≈ doubled at high concurrency. `DNSPROXY_PLAIN_POOL=0` to disable |
 
 The fork module path remains `github.com/AdguardTeam/dnsproxy` (unchanged from
 upstream) so it integrates via a `go.mod replace` directive in the host repo:
