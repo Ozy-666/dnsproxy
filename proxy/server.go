@@ -222,6 +222,14 @@ func (p *Proxy) logDNSMessage(ctx context.Context, m *dns.Msg) {
 		return
 	}
 
+	// m.String() serializes the whole message and is the single most expensive
+	// step on the per-query path; skip it entirely unless debug logging is
+	// actually enabled, otherwise the string is built twice per query (request
+	// and response) only to be discarded by the handler.
+	if !p.logger.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+
 	var msg string
 	if m.Response {
 		msg = "out"
