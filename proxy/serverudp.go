@@ -6,6 +6,9 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
+	"runtime"
+	"strconv"
 	"sync"
 
 	"github.com/AdguardTeam/dnsproxy/internal/bootstrap"
@@ -30,16 +33,44 @@ import (
 // returning, so the pool buffer is safe to return immediately after the call.
 var udpPackPool = sync.Pool{New: func() any { b := make([]byte, 2048); return &b }}
 
-// initUDPListeners initializes UDP listeners with configured addresses.
-func (p *Proxy) initUDPListeners(ctx context.Context) (err error) {
-	for _, a := range p.UDPListenAddr {
-		var pc *net.UDPConn
-		pc, sErr := p.listenUDP(ctx, a)
-		if sErr != nil {
-			return fmt.Errorf("listening on udp addr %s: %w", a, sErr)
+// udpListenerCount returns the number of UDP sockets to open per listen
+// address.  Multiple sockets bound to the same address with SO_REUSEPORT
+// (already set by [proxynetutil.ListenConfig]) let the kernel fan inbound
+// datagrams across independent file descriptors.  Because each response is
+// written back on the socket its query arrived on (see [Proxy.respondUDP]),
+// this also splits the per-fd write lock (internal/poll.fdMutex) that
+// otherwise serializes every UDP sendmsg through a single mutex under load —
+// the dominant block-contention point at high query rates.
+//
+// The count defaults to GOMAXPROCS (one reader/writer domain per P) and is
+// overridable via DNSPROXY_UDP_SHARDS; a value of 1 restores the single-socket
+// upstream behavior.  It is clamped to [1, 64].
+func udpListenerCount() (n int) {
+	n = runtime.GOMAXPROCS(0)
+	if s := os.Getenv("DNSPROXY_UDP_SHARDS"); s != "" {
+		if v, parseErr := strconv.Atoi(s); parseErr == nil && v > 0 {
+			n = v
 		}
+	}
 
-		p.udpListen = append(p.udpListen, pc)
+	return min(max(n, 1), 64)
+}
+
+// initUDPListeners initializes UDP listeners with configured addresses.  Each
+// address is opened on [udpListenerCount] separate SO_REUSEPORT sockets so the
+// per-socket read and write paths shard across cores; server.go starts one
+// [Proxy.udpPacketLoop] per socket.
+func (p *Proxy) initUDPListeners(ctx context.Context) (err error) {
+	shards := udpListenerCount()
+	for _, a := range p.UDPListenAddr {
+		for i := 0; i < shards; i++ {
+			pc, sErr := p.listenUDP(ctx, a)
+			if sErr != nil {
+				return fmt.Errorf("listening on udp addr %s: %w", a, sErr)
+			}
+
+			p.udpListen = append(p.udpListen, pc)
+		}
 	}
 
 	return nil
