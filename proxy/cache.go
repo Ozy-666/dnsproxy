@@ -3,10 +3,13 @@ package proxy
 import (
 	"bytes"
 	"encoding/binary"
+	"hash/maphash"
 	"log/slog"
 	"math"
 	"net"
+	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,20 +23,66 @@ import (
 // defaultCacheSize is the size of cache in bytes by default.
 const defaultCacheSize = 64 * 1024
 
+// cacheShardMaxCount is the default upper bound on the number of stripes the
+// main requests cache is split into.  Must be a power of two.  See
+// [cacheShardLimit] and [newCache] for how the effective count is chosen.
+const cacheShardMaxCount = 16
+
+// cacheHashSeed randomizes cache-shard selection per process so the mapping of
+// keys to shards isn't predictable from outside.
+var cacheHashSeed = maphash.MakeSeed()
+
+// cacheShard is one stripe of the main requests cache, with its own lock and
+// LRU.  Sharding turns the single global cache mutex — the dominant lock on the
+// serve path under load once the per-query serve-path locks were removed — into
+// several independent ones, so queries contend only when their keys hash to the
+// same shard.
+type cacheShard struct {
+	lock  sync.RWMutex
+	items glcache.Cache
+}
+
+// cacheShardLimit returns the configured upper bound on the number of cache
+// shards, honoring DNSPROXY_CACHE_SHARDS (1 disables sharding).  The result is
+// a power of two in [1, 64].
+func cacheShardLimit() (n int) {
+	n = cacheShardMaxCount
+	if s := os.Getenv("DNSPROXY_CACHE_SHARDS"); s != "" {
+		if v, parseErr := strconv.Atoi(s); parseErr == nil && v >= 1 {
+			n = v
+		}
+	}
+
+	n = min(max(n, 1), 64)
+
+	// Floor n to a power of two so the shard index is a cheap mask of the key
+	// hash.
+	p := 1
+	for p*2 <= n {
+		p *= 2
+	}
+
+	return p
+}
+
 // cache is used to cache requests and used upstreams.
 //
 // TODO(a.garipov):  Add [timeutil.Clock] and make tests less flaky.
 type cache struct {
-	// itemsLock protects requests cache.
-	itemsLock *sync.RWMutex
+	// shards stripe the main requests cache across independent locks and LRUs.
+	// len(shards) is always a power of two; a query maps to shards[hash(key) &
+	// shardMask].  See [newCache] for how the count is chosen.
+	shards []cacheShard
 
-	// itemsWithSubnetLock protects requests cache.
+	// shardMask is len(shards)-1, used to select a shard from a key hash.
+	shardMask uint64
+
+	// itemsWithSubnetLock protects the EDNS Client Subnet requests cache.
 	itemsWithSubnetLock *sync.RWMutex
 
-	// items is the requests cache.
-	items glcache.Cache
-
-	// itemsWithSubnet is the requests cache.
+	// itemsWithSubnet is the EDNS Client Subnet requests cache.  It is left
+	// unsharded: it is only populated when ECS is enabled, and getWithSubnet
+	// probes several keys per lookup, which doesn't fit single-key sharding.
 	itemsWithSubnet glcache.Cache
 
 	// optimistic defines if the cache should return expired items and resolve
@@ -206,10 +255,29 @@ type cacheConfig struct {
 
 // newCache returns a properly initialized cache.  logger must not be nil.
 func newCache(conf *cacheConfig) (c *cache) {
+	// Choose the shard count.  Only shard a sized cache, and never so finely
+	// that a full-size DNS message no longer fits in a single shard's LRU
+	// (glcache caps element size at the shard's MaxSize).  An unsized (size <=
+	// 0) or small cache stays single, identical to the unsharded behavior.
+	n := 1
+	shardSize := conf.size
+	if conf.size > 0 {
+		n = cacheShardLimit()
+		for n > 1 && conf.size/n < dns.MaxMsgSize {
+			n /= 2
+		}
+		shardSize = conf.size / n
+	}
+
+	shards := make([]cacheShard, n)
+	for i := range shards {
+		shards[i].items = createCache(shardSize)
+	}
+
 	c = &cache{
-		itemsLock:           &sync.RWMutex{},
+		shards:              shards,
+		shardMask:           uint64(n - 1),
 		itemsWithSubnetLock: &sync.RWMutex{},
-		items:               createCache(conf.size),
 		optimistic:          conf.optimistic,
 		optimisticTTL:       conf.optimisticTTL,
 		optimisticMaxAge:    conf.optimisticMaxAge,
@@ -222,25 +290,32 @@ func newCache(conf *cacheConfig) (c *cache) {
 	return c
 }
 
+// shard returns the cache shard responsible for key.
+func (c *cache) shard(key []byte) (s *cacheShard) {
+	return &c.shards[maphash.Bytes(cacheHashSeed, key)&c.shardMask]
+}
+
 // get returns cached item for the req if it's found.  expired is true if the
 // item's TTL is expired.  key is the resulting key for req.  It's returned to
 // avoid recalculating it afterwards.
 func (c *cache) get(req *dns.Msg) (ci *cacheItem, expired bool, key []byte) {
-	c.itemsLock.RLock()
-	defer c.itemsLock.RUnlock()
-
-	if !canLookUpInCache(c.items, req) {
+	if req == nil || len(req.Question) != 1 {
 		return nil, false, nil
 	}
 
 	key = msgToKey(req)
-	data := c.items.Get(key)
+	shard := c.shard(key)
+
+	shard.lock.RLock()
+	defer shard.lock.RUnlock()
+
+	data := shard.items.Get(key)
 	if data == nil {
 		return nil, false, key
 	}
 
 	if ci, expired = c.unpackItem(data, req); ci == nil {
-		c.items.Del(key)
+		shard.items.Del(key)
 	}
 
 	return ci, expired, key
@@ -336,11 +411,12 @@ func (c *cache) set(req, m *dns.Msg, u upstream.Upstream, l *slog.Logger) {
 
 	key := msgToKey(req)
 	packed := item.pack()
+	shard := c.shard(key)
 
-	c.itemsLock.Lock()
-	defer c.itemsLock.Unlock()
+	shard.lock.Lock()
+	defer shard.lock.Unlock()
 
-	c.items.Set(key, packed)
+	shard.items.Set(key, packed)
 }
 
 // setWithSubnet stores response and upstream with subnet in the cache.  The
@@ -364,10 +440,12 @@ func (c *cache) setWithSubnet(req, m *dns.Msg, u upstream.Upstream, n *net.IPNet
 
 // clearItems empties the simple cache.
 func (c *cache) clearItems() {
-	c.itemsLock.Lock()
-	defer c.itemsLock.Unlock()
-
-	c.items.Clear()
+	for i := range c.shards {
+		s := &c.shards[i]
+		s.lock.Lock()
+		s.items.Clear()
+		s.lock.Unlock()
+	}
 }
 
 // clearItemsWithSubnet empties the subnet cache, if any.

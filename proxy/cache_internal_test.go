@@ -162,8 +162,8 @@ func TestCache_expired(t *testing.T) {
 				u:   testUpsAddr,
 				ttl: tc.ttl,
 			}).pack()
-			testCache.items.Set(key, data)
-			t.Cleanup(testCache.items.Clear)
+			testCache.shard(key).items.Set(key, data)
+			t.Cleanup(testCache.clearItems)
 
 			r, expired, key := testCache.get(req)
 			assert.Equal(t, msgToKey(req), key)

@@ -17,7 +17,6 @@ import (
 
 	"github.com/AdguardTeam/dnsproxy/internal/dnsproxytest"
 	"github.com/AdguardTeam/dnsproxy/upstream"
-	glcache "github.com/AdguardTeam/golibs/cache"
 	"github.com/AdguardTeam/golibs/logutil/slogutil"
 	"github.com/AdguardTeam/golibs/netutil"
 	"github.com/AdguardTeam/golibs/testutil"
@@ -548,7 +547,7 @@ func TestProxy_Resolve_dnssecCache(t *testing.T) {
 		dctx := newDNSContext(ansHdr.Name, ansHdr.Rrtype, ansHdr.Class, tc.edns, txtDataLen/2)
 
 		t.Run(tc.name, func(t *testing.T) {
-			t.Cleanup(p.cache.items.Clear)
+			t.Cleanup(p.cache.clearItems)
 
 			err := p.Resolve(testutil.ContextWithTimeout(t, defaultTimeout), dctx)
 			require.NoError(t, err)
@@ -1350,11 +1349,7 @@ func TestProxy_Resolve_withOptimisticResolver(t *testing.T) {
 		m: buildResp(req, 0),
 		u: testUpsAddr,
 	}).pack()
-	items := glcache.New(glcache.Config{
-		EnableLRU: true,
-	})
-	items.Set(key, data)
-	p.cache.items = items
+	p.cache.shard(key).items.Set(key, data)
 
 	ctx := testutil.ContextWithTimeout(t, defaultTimeout)
 
@@ -1378,7 +1373,8 @@ func TestProxy_Resolve_withOptimisticResolver(t *testing.T) {
 	<-out
 
 	// Should be served from cache.
-	data = p.cache.items.Get(msgToKey(firstCtx.Req))
+	reqKey := msgToKey(firstCtx.Req)
+	data = p.cache.shard(reqKey).items.Get(reqKey)
 	unpacked, expired := p.cache.unpackItem(data, firstCtx.Req)
 	require.False(t, expired)
 	require.NotNil(t, unpacked)
