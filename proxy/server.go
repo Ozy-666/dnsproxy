@@ -98,6 +98,8 @@ func (p *Proxy) handleDNSRequest(ctx context.Context, d *DNSContext) (err error)
 		return nil
 	}
 
+	p.logMalformedQName(ctx, d)
+
 	ip := d.Addr.Addr()
 	d.IsPrivateClient = p.privateNets.Contains(ip)
 

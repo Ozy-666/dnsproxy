@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -747,6 +748,47 @@ func (p *Proxy) Resolve(ctx context.Context, dctx *DNSContext) (err error) {
 	dctx.scrub()
 
 	return err
+}
+
+// malformedQNameCount counts question names seen with an embedded space, for
+// exponential log sampling in [Proxy.logMalformedQName].
+var malformedQNameCount atomic.Uint64
+
+// logMalformedQName is a diagnostic watchdog: it logs, with exponential
+// sampling, when an incoming request's question name contains a literal space.
+// A DNS name produced by [dns.Msg.Unpack] never contains an unescaped 0x20
+// space (miekg renders one as "\ "), so its presence means the query type or
+// other data was concatenated into the name on some read/parse path upstream of
+// resolution.  Such names also fail to resolve (SERVFAIL) and, downstream,
+// polluted AdGuard Home's statistics with keys like "example.com\ a" (see the
+// matching guard there, sanitizeNormalizedName).
+//
+// This does not alter behavior; it records the exact transport ([DNSContext.Proto])
+// and raw name so the offending path can be pinned if the corruption ever
+// recurs on real traffic.  It is called for every incoming request, so the
+// check is a single byte-scan and the log is sampled.
+func (p *Proxy) logMalformedQName(ctx context.Context, d *DNSContext) {
+	if d.Req == nil || len(d.Req.Question) == 0 {
+		return
+	}
+
+	q := d.Req.Question[0]
+	if strings.IndexByte(q.Name, ' ') < 0 {
+		return
+	}
+
+	// Log the first occurrence and then powers of two to bound volume.
+	if n := malformedQNameCount.Add(1); n&(n-1) == 0 {
+		p.logger.WarnContext(
+			ctx,
+			"malformed question name with embedded space",
+			"name", fmt.Sprintf("%q", q.Name),
+			"qtype", dns.Type(q.Qtype).String(),
+			"proto", d.Proto,
+			"addr", d.Addr,
+			"count", n,
+		)
+	}
 }
 
 // validateRequest returns a response for invalid request or nil if the request
