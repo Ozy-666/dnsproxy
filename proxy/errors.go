@@ -21,3 +21,10 @@ import (
 func isEPIPE(err error) (ok bool) {
 	return errors.Is(err, syscall.EPIPE)
 }
+
+// isECONNRESET checks if the underlying error is ECONNRESET ("connection reset
+// by peer").  Like EPIPE, this is a benign client-side hangup mid-response
+// (common under DoT/DoQ floods of pipelined clients), not a server fault.
+func isECONNRESET(err error) (ok bool) {
+	return errors.Is(err, syscall.ECONNRESET)
+}

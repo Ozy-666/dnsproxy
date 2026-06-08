@@ -14,3 +14,9 @@ import "strings"
 func isEPIPE(err error) (ok bool) {
 	return strings.Contains(err.Error(), "write on closed pipe")
 }
+
+// isECONNRESET checks if the underlying error is a peer connection reset.  Plan
+// 9 relies on error strings instead of error codes.  See [isEPIPE].
+func isECONNRESET(err error) (ok bool) {
+	return strings.Contains(err.Error(), "connection reset")
+}
