@@ -288,7 +288,7 @@ func (p *dnsOverHTTPS) exchangeHTTPSClient(
 	}
 	defer slogutil.CloseAndLog(httpReq.Context(), p.logger, httpResp.Body, slog.LevelDebug)
 
-	body, err := io.ReadAll(httpResp.Body)
+	body, err := io.ReadAll(io.LimitReader(httpResp.Body, dns.MaxMsgSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", p.addrRedacted, err)
 	}
