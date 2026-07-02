@@ -1440,7 +1440,7 @@ func TestProxy_validateRequest(t *testing.T) {
 			Question: []dns.Question{},
 		},
 		addr:            testAddr,
-		wantRcode:       dns.RcodeServerFailure,
+		wantRcode:       dns.RcodeFormatError,
 		wantNil:         false,
 		isPrivateClient: false,
 	}, {
