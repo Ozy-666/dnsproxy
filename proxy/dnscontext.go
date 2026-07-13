@@ -153,7 +153,9 @@ func (dctx *DNSContext) calcFlagsAndSize() {
 	if o := dctx.Req.IsEdns0(); o != nil {
 		dctx.hasEDNS0 = true
 		dctx.doBit = o.Do()
-		dctx.udpSize = o.UDPSize()
+		// Clamp here as well so the OPT echoed in scrub advertises the size
+		// actually honored, never the client's raw value.
+		dctx.udpSize = min(o.UDPSize(), maxAdvertisedUDPSize)
 	}
 }
 
@@ -183,6 +185,14 @@ func (dctx *DNSContext) scrub() {
 	dctx.Res.Compress = true
 }
 
+// maxAdvertisedUDPSize is the largest client-advertised EDNS0 UDP payload
+// size honored for plain-UDP responses, per the DNS Flag Day 2020
+// recommendation (see https://dnsflagday.net/2020/).  Amplification floods
+// advertise huge buffer sizes (observed live: 10000) to reflect maximal
+// answers at spoofed victims; clamping forces early truncation (TC=1), so
+// real clients retry over TCP while spoofed sources cannot.
+const maxAdvertisedUDPSize = 1232
+
 // dnsSize returns the buffer size advertised in the requests OPT record.  When
 // the request is over TCP, it returns the maximum allowed size of 64KiB.
 func dnsSize(isUDP bool, r *dns.Msg) (size uint16) {
@@ -192,7 +202,7 @@ func dnsSize(isUDP bool, r *dns.Msg) (size uint16) {
 
 	var size16 uint16
 	if o := r.IsEdns0(); o != nil {
-		size16 = o.UDPSize()
+		size16 = min(o.UDPSize(), maxAdvertisedUDPSize)
 	}
 
 	return max(dns.MinMsgSize, size16)

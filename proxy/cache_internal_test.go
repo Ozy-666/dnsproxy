@@ -86,6 +86,10 @@ func TestServeCached(t *testing.T) {
 	r, _, err := client.Exchange(request, addr.String())
 	require.NoErrorf(t, err, "error in the first request: %s", err)
 
+	// The response OPT advertises the clamped EDNS0 UDP size the proxy
+	// actually honors, not the request's raw value.
+	reply.IsEdns0().SetUDPSize(maxAdvertisedUDPSize)
+
 	requireEqualMsgs(t, r, reply)
 }
 
