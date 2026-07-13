@@ -8,6 +8,11 @@ Maintained specifically for the [AdGuardHome-edge](https://github.com/Ozy-666/Ad
 the hot DNS query path and are benchmarked on the production host before
 deployment.
 
+**This fork is public and free for everyone.**  Every patch here runs in
+production on a live, internet-facing resolver under real DDoS and
+amplification attacks before it lands on this branch.  Use it, study it, or
+cherry-pick individual commits — same license as upstream (Apache-2.0).
+
 ## Optimization Highlights
 
 ### Zero-Alloc UDP Write Path
@@ -161,6 +166,27 @@ sockets plateau at a bounded count per concurrency level and are reused, instead
 of churning thousands of dials per second.  The remaining CPU is genuine work:
 the downstream TLS response write and the upstream exchange.
 
+### Clamped EDNS0 UDP Payload Size (Anti-Amplification)
+
+`proxy/dnscontext.go` — the EDNS0 UDP buffer size a client advertises is now
+honored only up to **1232 bytes** (`maxAdvertisedUDPSize`, the
+[DNS Flag Day 2020](https://dnsflagday.net/2020/) recommendation) for
+plain-UDP responses.  Both the truncation limit (`dnsSize`) and the OPT size
+echoed back to the client (`calcFlagsAndSize` → `scrub`) are clamped; the
+resolver never advertises more than it honors.
+
+Motivation: a live reflection campaign against the production host sent
+spoofed-source queries advertising **bufsize 10000** to reflect 2,257-byte TXT
+answers at victims (31.8× amplification).  With the clamp, the same query
+yields a ≤1232-byte `TC=1` answer: real clients transparently retry over TCP
+and get the full response; spoofed sources cannot complete a TCP handshake, so
+the reflection dies.  TCP, DoT, DoQ and DoH are connection-verified and
+unaffected — full-size answers still flow there.
+
+This complements the response-rate-limiting (RRL) layer in AdGuardHome-Edge
+(spec §7.18): RRL kills the bulk of a flood; the clamp caps the blast radius
+of whatever budget RRL still answers.
+
 ## Versioning
 
 The fork is based on upstream stable releases and extended with edge commits on
@@ -181,6 +207,7 @@ the `edge-udp-pool` branch.
 | `f9ab1de` | `MaxIncomingUniStreams` decoupled from the bidi cap (fixed 64) so a low DoQ limit can't break DoH3 control/QPACK streams |
 | `4728330` | `respondTCP` oversized-response guard (`msgLen > dns.MaxMsgSize` → `errTooLarge`); closes uint16 prefix truncation + out-of-bounds reslice panic (audit H2) |
 | `7363632` | Plain UDP/TCP upstream **connection pool** (reuse instead of dial-per-query); eliminates ~19% per-query `connect()` CPU; goodput ≈ doubled at high concurrency. `DNSPROXY_PLAIN_POOL=0` to disable |
+| `e1cef22` | **EDNS0 UDP payload clamp to 1232** (DNS Flag Day 2020, anti-amplification): honored truncation size and echoed OPT size both capped for plain UDP; TCP/DoT/DoQ/DoH untouched |
 
 The fork module path remains `github.com/AdguardTeam/dnsproxy` (unchanged from
 upstream) so it integrates via a `go.mod replace` directive in the host repo:
