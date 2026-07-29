@@ -223,3 +223,10 @@ replace github.com/AdguardTeam/dnsproxy => ../dnsproxy
 Builds must be run from the AdGuardHome-Edge repo root with this fork checked
 out at `../dnsproxy`.  A remote versioned replace does not work because the
 fork's `go.mod` declares the original module path, not the fork's.
+
+---
+
+## License & Attribution
+
+* **Original Work:** Copyright (c) 2017-2026 AdGuard Team, licensed under the [Apache License 2.0](LICENSE).
+* **Edge-Fork Modifications & Optimization Patches:** Copyright (c) 2026 **Ozy-666** (`https://dnsdoh.art`), licensed under the [Apache License 2.0](LICENSE).
