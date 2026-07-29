@@ -1,6 +1,10 @@
-# dnsproxy (Edge Fork for AdGuardHome)
+# dnsproxy (dnsdoh.art edge fork)
 
-This is a custom, performance-optimized fork of the original [AdguardTeam/dnsproxy](https://github.com/AdguardTeam/dnsproxy).
+> **Upstream:** Forked from [AdguardTeam/dnsproxy](https://github.com/AdguardTeam/dnsproxy) (Apache-2.0).  
+> **Maintained by:** [Ozy-666](https://github.com/Ozy-666) for the [dnsdoh.art](https://dnsdoh.art) production stack.  
+> **Base Version:** `v0.81.4-edge.1` + `edge-udp-pool` patchset.
+
+---
 
 ## Purpose
 
