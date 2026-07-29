@@ -229,4 +229,4 @@ fork's `go.mod` declares the original module path, not the fork's.
 ## License & Attribution
 
 * **Original Work:** Copyright (c) 2017-2026 AdGuard Team, licensed under the [Apache License 2.0](LICENSE).
-* **Edge-Fork Modifications & Optimization Patches:** Copyright (c) 2026 **Ozy-666** (`https://dnsdoh.art`), licensed under the [Apache License 2.0](LICENSE).
+* **Edge-Fork Modifications & Optimization Patches:** Copyright (c) 2026 **Ozy-666** [https://dnsdoh.art](https://dnsdoh.art), licensed under the [Apache License 2.0](LICENSE).
