@@ -242,6 +242,7 @@ the `edge-udp-pool` branch.
 | `4728330` | `respondTCP` oversized-response guard (`msgLen > dns.MaxMsgSize` → `errTooLarge`); closes uint16 prefix truncation + out-of-bounds reslice panic (audit H2) |
 | `7363632` | Plain UDP/TCP upstream **connection pool** (reuse instead of dial-per-query); eliminates ~19% per-query `connect()` CPU; goodput ≈ doubled at high concurrency. `DNSPROXY_PLAIN_POOL=0` to disable |
 | `e1cef22` | **EDNS0 UDP payload clamp to 1232** (DNS Flag Day 2020, anti-amplification): honored truncation size and echoed OPT size both capped for plain UDP; TCP/DoT/DoQ/DoH untouched |
+| `14c4d5b` | **RFC 7858 `dot` ALPN on DoT listeners**: upstream negotiated no ALPN on port 853 while advertising `alpn="dot"` in its DDR/SVCB designation; ALPN stays optional per RFC 7858 §3.1 |
 
 The fork module path remains `github.com/AdguardTeam/dnsproxy` (unchanged from
 upstream) so it integrates via a `go.mod replace` directive in the host repo:
