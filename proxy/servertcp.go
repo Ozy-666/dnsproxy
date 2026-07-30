@@ -1,3 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Copyright (C) AdGuard Software Ltd. — original dnsproxy sources.
+// Modifications Copyright (c) 2026 Ozy-666 (https://dnsdoh.art).
+//
+// Changed from upstream (Apache-2.0 Section 4(b) notice):
+//   - initTLSListeners now offers the RFC 7858 "dot" ALPN token on DNS-over-TLS
+//     listeners, so a resolver advertising alpn="dot" in its RFC 9461 SVCB /
+//     RFC 9462 DDR designation confirms the same token during the handshake.
+
 package proxy
 
 import (
@@ -21,6 +31,12 @@ import (
 // tcpPackPool is a pool of 2+dns.MaxMsgSize byte slices for TCP read/write.
 // Layout: [len_hi][len_lo][dns_wire_0..dns_wire_N].
 var tcpPackPool = sync.Pool{New: func() any { b := make([]byte, 2+dns.MaxMsgSize); return &b }}
+
+// NextProtoDoT is the ALPN token for DNS-over-TLS, registered by RFC 7858
+// (Section 6) and used as the "dot" ALPN value in the SVCB alpn parameter of
+// RFC 9461.  A resolver that advertises alpn="dot" in its DDR designation
+// should confirm the same token in the TLS handshake.
+const NextProtoDoT = "dot"
 
 // initTCPListeners initializes TCP listeners with configured addresses.
 func (p *Proxy) initTCPListeners(ctx context.Context) (err error) {
@@ -82,7 +98,19 @@ func (p *Proxy) initTLSListeners(ctx context.Context) (err error) {
 			return fmt.Errorf("listening on tls addr %s: %w", addr, err)
 		}
 
-		l := tls.NewListener(tcpListen, p.TLSConfig)
+		// Offer the RFC 7858 ALPN token, matching what the DDR/SVCB answer
+		// advertises as alpn="dot".  Clone first: the HTTPS and QUIC listeners
+		// derive their own NextProtos from the same shared config.
+		//
+		// ALPN stays optional for DoT (RFC 7858 Section 3.1 forbids rejecting a
+		// connection that does not use it), and Go honours that: a client that
+		// sends no ALPN extension still connects.  Only a client that offers
+		// ALPN with no token in common is refused, which is the RFC 7301
+		// behaviour.
+		tlsConfig := p.TLSConfig.Clone()
+		tlsConfig.NextProtos = append([]string{NextProtoDoT}, tlsConfig.NextProtos...)
+
+		l := tls.NewListener(tcpListen, tlsConfig)
 		p.tlsListen = append(p.tlsListen, l)
 
 		p.logger.InfoContext(ctx, "listening to tls", "addr", l.Addr())

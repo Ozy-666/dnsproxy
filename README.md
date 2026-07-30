@@ -191,6 +191,36 @@ This complements the response-rate-limiting (RRL) layer in AdGuardHome-Edge
 (spec §7.18): RRL kills the bulk of a flood; the clamp caps the blast radius
 of whatever budget RRL still answers.
 
+### DoT ALPN ("dot")
+
+`proxy/servertcp.go` — `initTLSListeners` now offers the
+[RFC 7858](https://www.rfc-editor.org/rfc/rfc7858#section-6) ALPN token `dot`
+on DNS-over-TLS listeners.  Upstream hands `p.TLSConfig` to `tls.NewListener`
+unchanged, so the DoT listener negotiates no ALPN at all, while the HTTPS and
+QUIC listeners clone the same config and set their own `NextProtos`.
+
+Motivation: a resolver publishing DDR/SVCB designations
+([RFC 9461](https://www.rfc-editor.org/rfc/rfc9461),
+[RFC 9462](https://www.rfc-editor.org/rfc/rfc9462)) advertises `alpn="dot"` for
+its port-853 TCP endpoint, and the handshake never confirmed the token it had
+just promised.  Verified on the production host before and after:
+
+```
+# before
+$ openssl s_client -connect <resolver>:853 -alpn dot </dev/null | grep ALPN
+No ALPN negotiated
+
+# after
+$ openssl s_client -connect <resolver>:853 -alpn dot </dev/null | grep ALPN
+ALPN protocol: dot
+```
+
+ALPN remains optional for DoT: RFC 7858 Section 3.1 forbids rejecting a
+connection that does not use it, and Go honors that — a client sending no ALPN
+extension still connects, verified against three client stacks.  The one
+behavior change is RFC 7301 conformance: a client that offers an ALPN list with
+no token in common is now refused rather than silently accepted.
+
 ## Versioning
 
 The fork is based on upstream stable releases and extended with edge commits on
