@@ -45,12 +45,14 @@ const (
 	minQUICMaxStreams = 1
 	maxQUICMaxStreams = 1024
 
-	// serverQUICUniStreams caps client-initiated unidirectional QUIC streams.
-	// DoQ does not use them; HTTP/3 (DoH3) requires a few — a control stream
-	// plus the QPACK encoder and decoder streams, at least three per RFC 9114.
-	// This is intentionally decoupled from the configurable bidirectional limit
-	// (the DoQ flood-control knob) so that a low QUICMaxIncomingStreams cannot
+	// serverQUICUniStreams caps client-initiated unidirectional QUIC streams on
+	// the DoH3 server, which needs a few of them: a control stream plus the
+	// QPACK encoder and decoder streams, at least three per RFC 9114.  It is
+	// intentionally decoupled from the configurable bidirectional limit (the
+	// DoQ flood-control knob) so that a low QUICMaxIncomingStreams cannot
 	// starve DoH3 of its mandatory control and QPACK streams.
+	//
+	// DoQ gets no unidirectional streams at all; see newServerQUICConfig.
 	serverQUICUniStreams = 64
 )
 
@@ -584,16 +586,19 @@ func closeQUICConn(conn *quic.Conn, code quic.ApplicationErrorCode, l *slog.Logg
 
 // newServerQUICConfig creates *quic.Config populated with the default settings.
 // maxStreams is the per-connection limit for concurrent bidirectional streams;
-// use resolvedQUICStreams to obtain a validated value from Config.  The
-// unidirectional limit is fixed at serverQUICUniStreams and not tied to
-// maxStreams, so capping DoQ query concurrency cannot break DoH3's control and
-// QPACK streams.  This function is supposed to be used for both DoQ and DoH3
-// server.
+// use resolvedQUICStreams to obtain a validated value from Config.  This
+// function is supposed to be used for the DoQ server only; DoH3 has its own
+// settings in newServerDoH3Config.
 func newServerQUICConfig(maxStreams int64) (conf *quic.Config) {
 	return &quic.Config{
-		MaxIdleTimeout:        maxQUICIdleTimeout,
-		MaxIncomingStreams:    maxStreams,
-		MaxIncomingUniStreams: serverQUICUniStreams,
+		MaxIdleTimeout:     maxQUICIdleTimeout,
+		MaxIncomingStreams: maxStreams,
+		// NOTE: Disable unidirectional streams because DoQ does not process
+		// them.  Accepting and leaving a large number of open unidirectional
+		// streams can lead to memory exhaustion.
+		//
+		// See AGDNS-4233.
+		MaxIncomingUniStreams: -1,
 		// Enable 0-RTT by default for all connections on the server-side.
 		Allow0RTT: true,
 	}

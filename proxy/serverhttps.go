@@ -63,7 +63,8 @@ func (p *Proxy) listenH3(
 ) (ln *quic.EarlyListener, err error) {
 	tlsConfig := p.TLSConfig.Clone()
 	tlsConfig.NextProtos = []string{"h3"}
-	quicListen, err := quic.ListenAddrEarly(addr.String(), tlsConfig, newServerQUICConfig(resolvedQUICStreams(p.QUICMaxIncomingStreams, p.logger)))
+	quicConf := newServerDoH3Config(resolvedQUICStreams(p.QUICMaxIncomingStreams, p.logger))
+	quicListen, err := quic.ListenAddrEarly(addr.String(), tlsConfig, quicConf)
 	if err != nil {
 		return nil, fmt.Errorf("quic listener: %w", err)
 	}
@@ -71,6 +72,21 @@ func (p *Proxy) listenH3(
 	p.logger.InfoContext(ctx, "listening to h3", "addr", quicListen.Addr())
 
 	return quicListen, nil
+}
+
+// newServerDoH3Config creates *quic.Config populated with the default settings.
+// maxStreams is the per-connection limit for concurrent bidirectional streams;
+// use resolvedQUICStreams to obtain a validated value from Config.  This
+// function is supposed to be used for the DoH3 server only, which, unlike DoQ,
+// does need unidirectional streams for HTTP/3 control and QPACK.
+func newServerDoH3Config(maxStreams int64) (conf *quic.Config) {
+	return &quic.Config{
+		MaxIdleTimeout:        maxQUICIdleTimeout,
+		MaxIncomingStreams:    maxStreams,
+		MaxIncomingUniStreams: serverQUICUniStreams,
+		// Enable 0-RTT by default for all connections on the server-side.
+		Allow0RTT: true,
+	}
 }
 
 // initHTTPSListeners creates TCP/UDP listeners and HTTP/H3 servers.

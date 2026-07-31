@@ -99,11 +99,16 @@ func TestProxy_QUICStreamLimit(t *testing.T) {
 	conf := newServerQUICConfig(resolvedQUICStreams(limit, testLogger))
 	assert.Equal(t, int64(limit), conf.MaxIncomingStreams)
 
-	// W1: the unidirectional limit must be decoupled from the bidirectional
-	// flood-control cap so a low limit cannot starve DoH3's control/QPACK
-	// streams (>=3 per RFC 9114).
-	assert.Equal(t, int64(serverQUICUniStreams), conf.MaxIncomingUniStreams)
-	assert.NotEqual(t, conf.MaxIncomingStreams, conf.MaxIncomingUniStreams)
+	// AGDNS-4233: DoQ never reads unidirectional streams, so the server must
+	// not let a peer open any.
+	assert.Equal(t, int64(-1), conf.MaxIncomingUniStreams)
+
+	// W1: DoH3 does need them, and its limit must stay decoupled from the
+	// bidirectional flood-control cap so a low limit cannot starve the
+	// control/QPACK streams (>=3 per RFC 9114).
+	h3Conf := newServerDoH3Config(resolvedQUICStreams(limit, testLogger))
+	assert.Equal(t, int64(serverQUICUniStreams), h3Conf.MaxIncomingUniStreams)
+	assert.NotEqual(t, h3Conf.MaxIncomingStreams, h3Conf.MaxIncomingUniStreams)
 }
 
 func TestProxy_quic(t *testing.T) {
