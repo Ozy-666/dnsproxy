@@ -1,3 +1,14 @@
+# EDGE-PATCH.md — historical marker
+
+This file records only the **first** patch of the fork (`v0.81.4-edge.1`, the
+zero-alloc UDP write path).  It is kept for provenance and is not maintained.
+
+**The current list of what this fork carries — every patch, its motivation, its
+measured effect, and which upstream releases were reviewed and skipped — lives
+in [`README.md`](README.md).**
+
+---
+
 Fork based on v0.81.4 with Zero-Alloc UDP pool.
 
 Patch: `proxy/serverudp.go` — `respondUDP()` replaces `resp.Pack()` (1 alloc)

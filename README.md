@@ -221,6 +221,64 @@ extension still connects, verified against three client stacks.  The one
 behavior change is RFC 7301 conformance: a client that offers an ALPN list with
 no token in common is now refused rather than silently accepted.
 
+### AA Bit Cleared on Relayed Responses
+
+`proxy/proxy.go` — `handleExchangeResult` clears the `AA` (Authoritative
+Answer) flag on responses received from an upstream.  A forwarding resolver is
+not authoritative for anything it relays, and passing the bit through lets a
+downstream client believe the answer came from the zone's authoritative server.
+Upstream fix for AdGuardHome issue #7955, taken as `35baa86`.
+
+### FORMERR Instead of a Silent Drop (JIGGLE Mitigation)
+
+`proxy/serverudp.go`, `proxy/proxy.go` — a UDP packet whose DNS header parses
+but whose body does not is answered **FORMERR** rather than dropped, and a
+request whose question count is not exactly 1 gets FORMERR rather than
+SERVFAIL, per [RFC 1035 §4.1.1](https://www.rfc-editor.org/rfc/rfc1035#section-4.1.1).
+This is the GHSA-p5f5-3p5g-rfjw (JIGGLE) mitigation, hand-merged here against
+the fork's `respondUDP`, which carries the pooled pack buffer and a different
+signature.
+
+Note for anyone tracking the advisory: the upstream commit *named* for JIGGLE
+contains only the regression test and a Go bump; the mitigation itself is a
+separate commit.
+
+Answering a malformed packet deserves scrutiny on a host that has been used for
+reflection.  It cannot amplify: a question that fails to parse is not echoed
+back, so the reply is smaller than the packet that triggered it.  Measured on
+the production host, a 33-byte malformed query drew a 12-byte response —
+**0.36×**, a deamplifier:
+
+```
+reply 12 B  (request was 33 B)   rcode=1 (FORMERR)  qr=1 aa=0
+qd=0 an=0 ns=0 ar=0
+```
+
+The reply is emitted inside dnsproxy, before the host's rate-limiting layer
+sees it; a packet-filter layer covers that gap independently.
+
+### DoQ Refuses Unidirectional QUIC Streams
+
+`proxy/serverquic.go`, `proxy/serverhttps.go` — `newServerQUICConfig` is now
+DoQ-only and sets `MaxIncomingUniStreams: -1`; DoH3 moves to its own
+`newServerDoH3Config`, which keeps the unidirectional allowance it genuinely
+needs for the HTTP/3 control stream and the QPACK encoder/decoder streams
+(≥3 per [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114)), plus this fork's
+configurable bidirectional limit.
+
+This is the fix for **GHSA-w6v6-f44j-3rj2** ("DoQ unidirectional stream state
+exhaustion", patched upstream in v0.83.1).  A client can open only the
+highest-numbered unidirectional stream; under QUIC stream-ID semantics every
+lower-numbered stream of the same type is then considered open, so quic-go
+materialises receive-stream state for all 65,535 of them, and dnsproxy — which
+never accepts or cancels them — holds that state until the connection closes.
+
+This fork was already partly shielded: `f9ab1de` had bounded the limit at 64
+against upstream's `math.MaxUint16`, capping the vector before the advisory
+published.  Refusing the streams outright is strictly better for DoQ, which
+reads none of them.  Landed here as `df16938` on 2026-07-31, before the
+advisory was published on 2026-08-18.
+
 ## Versioning
 
 The fork is based on upstream stable releases and extended with edge commits on
@@ -243,6 +301,18 @@ the `edge-udp-pool` branch.
 | `7363632` | Plain UDP/TCP upstream **connection pool** (reuse instead of dial-per-query); eliminates ~19% per-query `connect()` CPU; goodput ≈ doubled at high concurrency. `DNSPROXY_PLAIN_POOL=0` to disable |
 | `e1cef22` | **EDNS0 UDP payload clamp to 1232** (DNS Flag Day 2020, anti-amplification): honored truncation size and echoed OPT size both capped for plain UDP; TCP/DoT/DoQ/DoH untouched |
 | `14c4d5b` | **RFC 7858 `dot` ALPN on DoT listeners**: upstream negotiated no ALPN on port 853 while advertising `alpn="dot"` in its DDR/SVCB designation; ALPN stays optional per RFC 7858 §3.1 |
+| `1e17078` | `logDNSMessage` skips `Msg.String()` unless debug logging is enabled — the formatting cost was paid on every query regardless of level |
+| `3927e02` | UDP listener sharded into **SO_REUSEPORT** sockets, one per core; the kernel spreads incoming datagrams instead of funnelling them through a single socket queue |
+| `6645070` | Requests cache **sharded** to split the global cache lock |
+| `7363632` | (see above) plain upstream connection pooling |
+| `71dc552` | Diagnostic watchdog for malformed question names |
+| `b74b7bb` | Client connection resets logged at Debug rather than Error — a reset peer is not a server error, and at flood volume the log itself became the load |
+| `25d8f46` | **DoH upstream response body bounded** (`io.LimitReader`) before parsing — upstream AGDNS-4074 |
+| `ad5e739` | `golang.org/x/net` bumped to v0.55.0 (GO-2026-5026) |
+| `2c1f097` | **DoH upstream validation** hardened: message ID zeroed in the wire bytes, ID-0 echo required, question-section validation unified with plain DNS (upstream AGDNS-4080, GHSA-4qjf-2hgm-92q6) |
+| `35baa86` | **AA bit cleared** on relayed upstream responses (AdGuardHome #7955) |
+| `c9d9863` | **FORMERR** for malformed UDP and for a question count ≠ 1, instead of a silent drop / SERVFAIL — GHSA-p5f5-3p5g-rfjw (JIGGLE) |
+| `df16938` | **DoQ refuses unidirectional QUIC streams** (`-1`); DoH3 split into `newServerDoH3Config` — GHSA-w6v6-f44j-3rj2, landed here 18 days before the advisory published |
 
 The fork module path remains `github.com/AdguardTeam/dnsproxy` (unchanged from
 upstream) so it integrates via a `go.mod replace` directive in the host repo:
@@ -254,6 +324,29 @@ replace github.com/AdguardTeam/dnsproxy => ../dnsproxy
 Builds must be run from the AdGuardHome-Edge repo root with this fork checked
 out at `../dnsproxy`.  A remote versioned replace does not work because the
 fork's `go.mod` declares the original module path, not the fork's.
+
+## Upstream Tracking
+
+This fork tracks upstream by **review**, not by merge.  Upstream releases are
+read commit by commit; what applies is ported by hand onto the patched code and
+what does not is recorded with a reason.  The base version therefore stays where
+the code is, and is not bumped to advertise currency.
+
+| Reviewed | Upstream | Outcome |
+|---|---|---|
+| 2026-07-31 | releases up to `v0.83.0` | Three patches taken: `35baa86`, `c9d9863`, `df16938`.  The DNSCrypt-upstream validation work was skipped — the consuming deployment speaks plain DNS to a local DNSCrypt process, so this code never runs there. |
+| 2026-08-21 | `v0.83.1` … `v0.84.1` | **Nothing taken.**  The range is four commits: a DNS64 CNAME/DNAME chain fix (#438), a `dnsproxytest` helper package, a Go bump, and `AGDNS-4357`, which unexports every field of `proxy.Proxy`.  That last one is a breaking API change through the exact surface this fork patches — the pooled UDP write path, the QUIC server config, the rate-limit and cookie hooks — with no security content behind it.  The DNS64 fix is unreachable in the consuming deployment (`use_dns64: false`).  GHSA-w6v6-f44j-3rj2, patched upstream in `v0.83.1`, was already answered here by `df16938`. |
+
+### Constants mirrored downstream
+
+`maxAdvertisedUDPSize` (1232, `proxy/dnscontext.go`) is **mirrored** in the
+consuming AdGuardHome fork's `internal/dnsforward/msg.go`, which clamps the
+EDNS(0) buffer size it echoes on responses it generates itself (blocked answers,
+NXDOMAIN, REFUSED, SERVFAIL, NODATA, FORMERR).  Upstream AdGuard Home echoes the
+client's raw advertised size there; that would advertise a buffer this fork
+never honours, on exactly the responses cheapest for a reflector to trigger.
+
+If this constant changes, change it in both places.
 
 ---
 
