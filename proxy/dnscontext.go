@@ -181,8 +181,39 @@ func (dctx *DNSContext) scrub() {
 	}
 
 	dctx.Res.Truncate(int(dnsSize(dctx.Proto == ProtoUDP, dctx.Req)))
+	if dctx.Proto == ProtoUDP && dctx.Res.Truncated {
+		emptyTruncated(dctx.Res)
+	}
+
 	// Some devices require DNS message compression.
 	dctx.Res.Compress = true
+}
+
+// emptyTruncated strips the record sections from a truncated UDP response,
+// leaving the header, the question and the OPT record.
+//
+// [dns.Msg.Truncate] fills the datagram with as many records as fit before it
+// sets TC.  RFC 2181 Section 9 tells a client that receives TC=1 to ignore the
+// response and retry over a transport that permits larger replies, so those
+// records are bytes no conforming client may use — but bytes a spoofed source
+// address is still reflected.  Emptying the response keeps the amplification
+// factor of a truncated answer at roughly 1, which is what Google, Cloudflare
+// and Quad9 return for the same query.  This complements the
+// [maxAdvertisedUDPSize] clamp rather than replacing it: the clamp decides
+// when TC is set, this decides how much is reflected once it is.
+//
+// The OPT record is kept.  It carries the DNS Cookie a real client needs in
+// order to prove return-routability on its retry, and dropping it would also
+// drop the EDNS(0) state a response is required to echo.
+func emptyTruncated(res *dns.Msg) {
+	res.Answer = nil
+	res.Ns = nil
+
+	if opt := res.IsEdns0(); opt != nil {
+		res.Extra = []dns.RR{opt}
+	} else {
+		res.Extra = nil
+	}
 }
 
 // maxAdvertisedUDPSize is the largest client-advertised EDNS0 UDP payload
