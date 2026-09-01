@@ -313,6 +313,7 @@ the `edge-udp-pool` branch.
 | `35baa86` | **AA bit cleared** on relayed upstream responses (AdGuardHome #7955) |
 | `c9d9863` | **FORMERR** for malformed UDP and for a question count ≠ 1, instead of a silent drop / SERVFAIL — GHSA-p5f5-3p5g-rfjw (JIGGLE) |
 | `df16938` | **DoQ refuses unidirectional QUIC streams** (`-1`); DoH3 split into `newServerDoH3Config` — GHSA-w6v6-f44j-3rj2, landed here 18 days before the advisory published |
+| `c9c8de7` | **Truncated UDP responses emptied**, not filled: once TC is set, `Answer`/`Ns` are dropped and `Extra` reduced to the OPT (cookie preserved), leaving a bare header + question. RFC 2181 §9 forbids a client from using those records anyway; matches Google/Cloudflare/Quad9. Pairs with the 1232 clamp (`e1cef22`) — the clamp decides *when* TC is set, this decides *how much* is reflected once it is |
 
 The fork module path remains `github.com/AdguardTeam/dnsproxy` (unchanged from
 upstream) so it integrates via a `go.mod replace` directive in the host repo:
