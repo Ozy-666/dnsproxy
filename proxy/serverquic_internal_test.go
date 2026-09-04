@@ -74,11 +74,11 @@ func TestProxy_QUICStreamLimit(t *testing.T) {
 
 	const limit = 4
 	dnsProxy := mustNew(t, &Config{
-		Logger:                testLogger,
-		QUICListenAddr:        []*net.UDPAddr{net.UDPAddrFromAddrPort(localhostAnyPort)},
-		TLSConfig:             serverConfig,
-		UpstreamConfig:        newTestUpstreamConfig(t, defaultTimeout, testDefaultUpstreamAddr),
-		TrustedProxies:        defaultTrustedProxies,
+		Logger:                 testLogger,
+		QUICListenAddr:         []*net.UDPAddr{net.UDPAddrFromAddrPort(localhostAnyPort)},
+		TLSConfig:              serverConfig,
+		UpstreamConfig:         newTestUpstreamConfig(t, defaultTimeout, testDefaultUpstreamAddr),
+		TrustedProxies:         defaultTrustedProxies,
 		QUICMaxIncomingStreams: limit,
 	})
 

@@ -235,7 +235,7 @@ func New(c *Config) (p *Proxy, err error) {
 		),
 		recDetector:     newRecursionDetector(recursionTTL, cachedRecurrentReqNum),
 		pendingRequests: pendingRequestsOrDefault(c.PendingRequests),
-		logger: loggerOrDefault(c.Logger),
+		logger:          loggerOrDefault(c.Logger),
 	}
 
 	emptyRTT := map[string]upstreamRTTStats{}
