@@ -403,3 +403,37 @@ func sendTestQUICMessage(t *testing.T, conn *quic.Conn, doqVersion DoQVersion) {
 	resp := sendQUICMessage(t, msg, conn, doqVersion)
 	requireResponse(t, msg, resp)
 }
+
+func TestIsReplayableOpcode(t *testing.T) {
+	testCases := []struct {
+		name   string
+		opcode int
+		want   bool
+	}{{
+		name:   "query",
+		opcode: dns.OpcodeQuery,
+		want:   true,
+	}, {
+		name:   "notify",
+		opcode: dns.OpcodeNotify,
+		want:   true,
+	}, {
+		name:   "iquery",
+		opcode: dns.OpcodeIQuery,
+		want:   false,
+	}, {
+		name:   "status",
+		opcode: dns.OpcodeStatus,
+		want:   false,
+	}, {
+		name:   "update",
+		opcode: dns.OpcodeUpdate,
+		want:   false,
+	}}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isReplayableOpcode(tc.opcode))
+		})
+	}
+}
