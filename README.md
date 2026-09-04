@@ -279,6 +279,30 @@ published.  Refusing the streams outright is strictly better for DoQ, which
 reads none of them.  Landed here as `df16938` on 2026-07-31, before the
 advisory was published on 2026-08-18.
 
+### DoQ Rejects Non-Replayable Opcodes in 0-RTT Data
+
+`proxy/serverquic.go` — `validQUICMsg` now implements check 7 of
+[RFC 9250 §4.5](https://www.rfc-editor.org/rfc/rfc9250#section-4.5), which had
+stood as a TODO since the file was written ("The information necessary to
+validate this is not exposed by quic-go").  A message whose opcode is neither
+QUERY nor NOTIFY, arriving on a connection with `Used0RTT` set and before
+`HandshakeComplete()` has fired, is early data carrying a transaction the RFC
+forbids in 0-RTT; the connection is closed with `DOQ_PROTOCOL_ERROR`, one of
+the three server behaviours §4.5 permits.
+
+It is reachable here rather than theoretical: this fork serves DoQ with
+`Allow0RTT` and `ListenEarly`, and nothing anywhere in the proxy filters
+opcodes, so a replayed 0-RTT UPDATE was previously handled like any other
+message.
+
+The check is best-effort by construction, and upstream's design is kept rather
+than improved on: the handshake state is read when the message is validated,
+not when it arrived, so early data whose handshake completes first is
+classified as 1-RTT and processed; and conversely a genuine 1-RTT non-QUERY
+message that overtakes the handshake-complete signal aborts the connection.
+Both are confined to opcodes this resolver has no legitimate use for either
+way.
+
 ## Versioning
 
 The fork is based on upstream stable releases and extended with edge commits on
@@ -314,6 +338,7 @@ the `edge-udp-pool` branch.
 | `c9d9863` | **FORMERR** for malformed UDP and for a question count ≠ 1, instead of a silent drop / SERVFAIL — GHSA-p5f5-3p5g-rfjw (JIGGLE) |
 | `df16938` | **DoQ refuses unidirectional QUIC streams** (`-1`); DoH3 split into `newServerDoH3Config` — GHSA-w6v6-f44j-3rj2, landed here 18 days before the advisory published |
 | `c9c8de7` | **Truncated UDP responses emptied**, not filled: once TC is set, `Answer`/`Ns` are dropped and `Extra` reduced to the OPT (cookie preserved), leaving a bare header + question. RFC 2181 §9 forbids a client from using those records anyway; matches Google/Cloudflare/Quad9. Pairs with the 1232 clamp (`e1cef22`) — the clamp decides *when* TC is set, this decides *how much* is reflected once it is |
+| `e66fa7f` | **DoQ rejects non-replayable opcodes in 0-RTT data**: a transaction whose opcode is neither QUERY nor NOTIFY, received as QUIC early data, closes the connection with `DOQ_PROTOCOL_ERROR` instead of being processed — RFC 9250 §4.5 check 7, ported from upstream `096ff91` (AGH-32) in v0.84.2 |
 
 The fork module path remains `github.com/AdguardTeam/dnsproxy` (unchanged from
 upstream) so it integrates via a `go.mod replace` directive in the host repo:
@@ -337,6 +362,7 @@ the code is, and is not bumped to advertise currency.
 |---|---|---|
 | 2026-07-31 | releases up to `v0.83.0` | Three patches taken: `35baa86`, `c9d9863`, `df16938`.  The DNSCrypt-upstream validation work was skipped — the consuming deployment speaks plain DNS to a local DNSCrypt process, so this code never runs there. |
 | 2026-08-21 | `v0.83.1` … `v0.84.1` | **Nothing taken.**  The range is four commits: a DNS64 CNAME/DNAME chain fix (#438), a `dnsproxytest` helper package, a Go bump, and `AGDNS-4357`, which unexports every field of `proxy.Proxy`.  That last one is a breaking API change through the exact surface this fork patches — the pooled UDP write path, the QUIC server config, the rate-limit and cookie hooks — with no security content behind it.  The DNS64 fix is unreachable in the consuming deployment (`use_dns64: false`).  GHSA-w6v6-f44j-3rj2, patched upstream in `v0.83.1`, was already answered here by `df16938`. |
+| 2026-09-04 | `v0.84.2` | **One patch taken:** `e66fa7f`, adapting `096ff91` (AGH-32) — the RFC 9250 §4.5 0-RTT opcode check, reachable here because DoQ is served with `Allow0RTT`.  The release's only other commit is a Go 1.26.8 / quic-go v0.60.0 bump, which this fork does not need: `ConnectionState().Used0RTT` is already present in the pinned quic-go v0.59.0, and builds run on Go 1.27.1. |
 
 ### Constants mirrored downstream
 
