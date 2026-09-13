@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/AdguardTeam/dnsproxy/internal/bootstrap"
 	proxynetutil "github.com/AdguardTeam/dnsproxy/internal/netutil"
@@ -125,6 +126,125 @@ func (p *Proxy) listenUDP(ctx context.Context, addr *net.UDPAddr) (conn *net.UDP
 	return conn, nil
 }
 
+// udpListenersRetired counts UDP listener sockets closed and replaced after an
+// unrecoverable read error.  A retirement means a socket stopped serving
+// queries, so it must never be silent: the [net.ErrClosed] branch of
+// [logUDPConnError] logs at debug level and is invisible under a non-verbose
+// log level, which is how a dead listener can go unnoticed for days.
+var udpListenersRetired atomic.Uint64
+
+// udpLoopAction is what a UDP listener loop must do after a read attempt.
+type udpLoopAction uint8
+
+const (
+	// udpLoopContinue means the loop must keep reading from the same socket.
+	udpLoopContinue udpLoopAction = iota
+
+	// udpLoopRetire means the socket is unusable and must be closed and
+	// replaced.
+	udpLoopRetire
+
+	// udpLoopStop means the loop must return.
+	udpLoopStop
+)
+
+// udpLoopActionFor decides how [Proxy.udpPacketLoop] must react to err from a
+// read on a listener socket.  started must be the current value of
+// [Proxy.isStarted].
+//
+// Breaking out of the loop on every error leaves the socket bound but unread.
+// With [udpListenerCount] sharding the kernel keeps hashing its SO_REUSEPORT
+// share of datagrams into it, so such a socket silently black-holes 1/N of all
+// queries once its receive buffer fills.  An error that is fatal for one
+// socket must therefore retire it, not abandon it.
+func udpLoopActionFor(err error, started bool) (action udpLoopAction) {
+	if !started {
+		return udpLoopStop
+	}
+
+	if err == nil {
+		return udpLoopContinue
+	}
+
+	if errors.Is(err, net.ErrClosed) {
+		return udpLoopStop
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return udpLoopContinue
+	}
+
+	return udpLoopRetire
+}
+
+// retireUDPListener closes conn after an unrecoverable read error and opens a
+// replacement socket on the same address.  Closing is the point: it removes
+// the dead socket from the SO_REUSEPORT group so the kernel stops delivering
+// datagrams that nobody will ever read.  It returns nil if no replacement
+// could be opened, in which case the caller must stop.
+func (p *Proxy) retireUDPListener(
+	ctx context.Context,
+	conn *net.UDPConn,
+	readErr error,
+) (next *net.UDPConn) {
+	addr, _ := conn.LocalAddr().(*net.UDPAddr)
+
+	p.logger.ErrorContext(
+		ctx,
+		"retiring udp listener after read error",
+		"addr", conn.LocalAddr(),
+		"retired_total", udpListenersRetired.Add(1),
+		slogutil.KeyError, readErr,
+	)
+
+	p.logClose(ctx, slog.LevelError, conn, "closing retired udp listener")
+
+	if addr == nil || !p.isStarted() {
+		return nil
+	}
+
+	var err error
+	next, err = p.listenUDP(ctx, addr)
+	if err != nil {
+		p.logger.ErrorContext(
+			ctx,
+			"reopening udp listener",
+			"addr", addr,
+			slogutil.KeyError, err,
+		)
+
+		return nil
+	}
+
+	if !p.swapUDPListener(conn, next) {
+		// Shutdown cleared the listener set while the socket was reopening.
+		p.logClose(ctx, slog.LevelDebug, next, "closing replacement udp listener")
+
+		return nil
+	}
+
+	return next
+}
+
+// swapUDPListener replaces old with next in [Proxy.udpListen] so that shutdown
+// closes the socket that is actually in use.  It returns false if old is no
+// longer listed, which means shutdown already ran.
+func (p *Proxy) swapUDPListener(old, next *net.UDPConn) (ok bool) {
+	p.Lock()
+	defer p.Unlock()
+
+	for i, l := range p.udpListen {
+		if l == old {
+			p.udpListen[i] = next
+
+			return true
+		}
+	}
+
+	return false
+}
+
 // udpPacketLoop listens for incoming UDP packets and handles them.
 //
 // See also the comment on [Proxy.requestsSema].
@@ -161,9 +281,19 @@ func (p *Proxy) udpPacketLoop(ctx context.Context, conn *net.UDPConn, reqSema sy
 		}
 
 		if err != nil {
-			logUDPConnError(err, conn, p.logger)
+			switch udpLoopActionFor(err, p.isStarted()) {
+			case udpLoopContinue:
+				continue
+			case udpLoopRetire:
+				conn = p.retireUDPListener(ctx, conn, err)
+				if conn == nil {
+					return
+				}
+			default:
+				logUDPConnError(err, conn, p.logger)
 
-			break
+				return
+			}
 		}
 	}
 }
