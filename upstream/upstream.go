@@ -425,6 +425,27 @@ const errQuestion errors.Error = "bad question section"
 // with req.  Any error returned wraps [errQuestion], since it essentially
 // validates the question section of resp.  req and resp must not be nil.
 func validateResponse(req, resp *dns.Msg) (err error) {
+	if resp.Rcode == dns.RcodeFormatError && len(resp.Question) == 0 {
+		// A server that could not parse the question section cannot echo it
+		// back, so a FORMERR legitimately carries QDCOUNT=0.  See RFC 1035
+		// Section 4.1.1: FORMERR means "the name server was unable to
+		// interpret the query".
+		//
+		// Rejecting it closed a healthy pooled connection and reported the
+		// upstream as broken while it was behaving correctly.  Measured on a
+		// production resolver 2026-09-21: unbound answers this way to
+		// QDCOUNT=0, QDCOUNT=2 and truncated-question probes, 48 times a day
+		// from a DNS fingerprinting scanner.
+		//
+		// This carve-out is scoped to the question section alone.  It cannot
+		// weaken spoofing resistance: the transaction ID is matched earlier by
+		// [dns.Client.ExchangeWithConn], which returns before this function is
+		// called, and a FORMERR carries no resource records, so accepting one
+		// can never poison a cache.  The worst an off-path attacker gains is
+		// an induced failure, which is what rejecting it already produced.
+		return nil
+	}
+
 	if qlen := len(resp.Question); qlen != 1 {
 		return fmt.Errorf("%w: only 1 question allowed; got %d", errQuestion, qlen)
 	}

@@ -257,6 +257,53 @@ qd=0 an=0 ns=0 ar=0
 The reply is emitted inside dnsproxy, before the host's rate-limiting layer
 sees it; a packet-filter layer covers that gap independently.
 
+### Upstream FORMERR With an Empty Question Is Accepted
+
+`upstream/upstream.go` — `validateResponse` no longer rejects a response that
+carries **QDCOUNT=0 when the rcode is FORMERR**.  A server that could not parse
+the question section cannot echo it back, so that shape is correct per
+[RFC 1035 §4.1.1](https://www.rfc-editor.org/rfc/rfc1035#section-4.1.1).
+
+**This fork was rejecting its own output.**  The JIGGLE mitigation above makes
+the *server* side answer an unparseable query with a 12-byte, `qd=0` FORMERR.
+The *client* side then treated exactly that reply as a malformed response.
+Measured on the production host against its own listener:
+
+```
+truncated question body      12 B  rcode=1  qd=0
+QDCOUNT=1 but no question    12 B  rcode=1  qd=0
+QDCOUNT=0, no question       12 B  rcode=1  qd=0
+compression-pointer loop     12 B  rcode=1  qd=0
+```
+
+The cost was not cosmetic.  `plain.go` closes the connection rather than
+returning it to the pool whenever `validateResponse` fails, so every one of
+these tore down a healthy pooled connection to the local resolver and surfaced
+as `exchange failed … bad question section: only 1 question allowed; got 0`,
+which reads as an upstream defect.  Measured over 24 h on the production
+resolver: **48 occurrences**, all from a DNS fingerprinting scanner probing
+with bogus classes and malformed questions (`baseline.dnssoftver.com`,
+`ErrorMissingDname`, doubled questions).  Separately and unrelated, 65 genuine
+2.00 s upstream timeouts occurred in the same window — cold-miss recursions to
+slow authoritative servers, 38 % of them reverse DNS.
+
+**The carve-out is scoped to the question section and nothing else.**
+
+- The **transaction ID is matched earlier**, by `dns.Client.ExchangeWithConn`
+  (`if err == nil && r.Id != m.Id { err = ErrId }`), which returns before
+  `validateResponse` is reached.  Nothing here touches it.
+- **Only FORMERR** is forgiven.  `SERVFAIL`, `NOERROR` or any other rcode with
+  an empty question is still rejected, and a FORMERR that *does* echo a
+  question is still validated against the request.
+- It **cannot weaken cache-poisoning resistance**: a FORMERR carries no
+  resource records, so nothing from it can be cached.  The worst an off-path
+  attacker gains is an induced failure — which is what rejecting the response
+  already produced.
+
+Covered by `TestValidateResponse` in `upstream/upstream_internal_test.go`,
+which is the first test this function has had.  Reported upstream as
+[dnsproxy#525](https://github.com/AdguardTeam/dnsproxy/issues/525), unanswered.
+
 ### DoQ Refuses Unidirectional QUIC Streams
 
 `proxy/serverquic.go`, `proxy/serverhttps.go` — `newServerQUICConfig` is now

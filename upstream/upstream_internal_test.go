@@ -873,3 +873,108 @@ func (r *headerRecorder) headersWithLock() (res []qlog.PacketHeader) {
 func (*headerRecorder) Close() (err error) {
 	return nil
 }
+
+// TestValidateResponse covers the question-section checks, including the
+// FORMERR carve-out.
+//
+// A server that cannot parse the question section cannot echo it back, so a
+// FORMERR response legitimately carries QDCOUNT=0 (RFC 1035 Section 4.1.1).
+// Measured on a production resolver 2026-09-21: unbound answers exactly that
+// way when a client sends QDCOUNT=0, QDCOUNT=2, or a truncated question, and
+// 48 such probes a day arrived from a DNS fingerprinting scanner.  Rejecting
+// the response tore down a healthy pooled connection every time and reported
+// the upstream as broken when it was behaving correctly.
+//
+// ⚠️ The carve-out is scoped to the QUESTION SECTION only.  The transaction-ID
+// match is enforced earlier and separately, by [dns.Client.ExchangeWithConn]
+// (miekg/dns client.go: `if err == nil && r.Id != m.Id { err = ErrId }`), which
+// returns before validateResponse is ever called.  Nothing here relaxes it.
+func TestValidateResponse(t *testing.T) {
+	t.Parallel()
+
+	const name = "example.org."
+
+	newReq := func() (req *dns.Msg) {
+		return (&dns.Msg{}).SetQuestion(name, dns.TypeA)
+	}
+
+	testCases := []struct {
+		name       string
+		resp       func() (resp *dns.Msg)
+		wantErrMsg string
+	}{{
+		name: "valid",
+		resp: func() (resp *dns.Msg) {
+			return (&dns.Msg{}).SetReply(newReq())
+		},
+		wantErrMsg: "",
+	}, {
+		// The case this test was written for.
+		name: "formerr_empty_question",
+		resp: func() (resp *dns.Msg) {
+			resp = (&dns.Msg{}).SetRcode(newReq(), dns.RcodeFormatError)
+			resp.Question = nil
+
+			return resp
+		},
+		wantErrMsg: "",
+	}, {
+		// An empty question section is only forgiven for FORMERR.  Any other
+		// rcode with no question is still a malformed response.
+		name: "servfail_empty_question",
+		resp: func() (resp *dns.Msg) {
+			resp = (&dns.Msg{}).SetRcode(newReq(), dns.RcodeServerFailure)
+			resp.Question = nil
+
+			return resp
+		},
+		wantErrMsg: "bad question section: only 1 question allowed; got 0",
+	}, {
+		name: "noerror_empty_question",
+		resp: func() (resp *dns.Msg) {
+			resp = (&dns.Msg{}).SetReply(newReq())
+			resp.Question = nil
+
+			return resp
+		},
+		wantErrMsg: "bad question section: only 1 question allowed; got 0",
+	}, {
+		// A FORMERR that DOES echo a question must still be validated against
+		// it; the carve-out must not become a blanket exemption.
+		name: "formerr_mismatched_name",
+		resp: func() (resp *dns.Msg) {
+			resp = (&dns.Msg{}).SetRcode(newReq(), dns.RcodeFormatError)
+			resp.Question[0].Name = "other.example."
+
+			return resp
+		},
+		wantErrMsg: `bad question section: mismatched name "other.example."`,
+	}, {
+		name: "two_questions",
+		resp: func() (resp *dns.Msg) {
+			resp = (&dns.Msg{}).SetReply(newReq())
+			resp.Question = append(resp.Question, resp.Question[0])
+
+			return resp
+		},
+		wantErrMsg: "bad question section: only 1 question allowed; got 2",
+	}, {
+		name: "mismatched_type",
+		resp: func() (resp *dns.Msg) {
+			resp = (&dns.Msg{}).SetReply(newReq())
+			resp.Question[0].Qtype = dns.TypeAAAA
+
+			return resp
+		},
+		wantErrMsg: "bad question section: mismatched type AAAA",
+	}}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateResponse(newReq(), tc.resp())
+			testutil.AssertErrorMsg(t, tc.wantErrMsg, err)
+		})
+	}
+}
