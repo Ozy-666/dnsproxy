@@ -257,6 +257,11 @@ qd=0 an=0 ns=0 ar=0
 The reply is emitted inside dnsproxy, before the host's rate-limiting layer
 sees it; a packet-filter layer covers that gap independently.
 
+> ⚠️ **Measuring zero FORMERRs here does not mean this mitigation is broken.**
+> On the production host a packet-filter layer may drop malformed queries
+> before they reach AdGuard Home, in which case this path is never exercised.
+> Check the host's defence layers before concluding the mitigation failed.
+
 ### Upstream FORMERR With an Empty Question Is Accepted
 
 `upstream/upstream.go` — `validateResponse` no longer rejects a response that
