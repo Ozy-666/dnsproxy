@@ -276,11 +276,28 @@ QDCOUNT=0, no question       12 B  rcode=1  qd=0
 compression-pointer loop     12 B  rcode=1  qd=0
 ```
 
-The cost was not cosmetic.  `plain.go` closes the connection rather than
-returning it to the pool whenever `validateResponse` fails, so every one of
-these tore down a healthy pooled connection to the local resolver and surfaced
-as `exchange failed … bad question section: only 1 question allowed; got 0`,
-which reads as an upstream defect.  Measured over 24 h on the production
+The cost was not cosmetic, and it was larger than the log line suggests.
+Measured as an A/B against the built binaries, both pointed at the same stub
+upstream that answers every query with a `qd=0` FORMERR:
+
+| | pre-fix | post-fix |
+|---|---|---|
+| `exchange failed` logged | 1 | **0** |
+| **TCP fallback attempts** | **1** | **0** |
+| rcode returned to client | SERVFAIL | SERVFAIL |
+
+`plain.go` closes the connection rather than returning it to the pool whenever
+`validateResponse` fails, and the rejected UDP exchange then **retries the whole
+query over TCP**.  So each occurrence tore down a healthy pooled connection to
+the local resolver *and* opened a TCP connection to re-ask a question that had
+already been answered correctly — while surfacing as `exchange failed … bad
+question section: only 1 question allowed; got 0`, which reads as an upstream
+defect.
+
+The client-visible rcode is unchanged: a response with no question cannot be
+returned to the client as-is, so it still becomes SERVFAIL.  What the fix
+removes is the spurious TCP retry, the pooled-connection teardown, and a log
+line that blamed a correctly-behaving upstream.  Measured over 24 h on the production
 resolver: **48 occurrences**, all from a DNS fingerprinting scanner probing
 with bogus classes and malformed questions (`baseline.dnssoftver.com`,
 `ErrorMissingDname`, doubled questions).  Separately and unrelated, 65 genuine
