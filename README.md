@@ -3,6 +3,14 @@
 > [!IMPORTANT]
 > **Archived in October 2026.** This repository is no longer maintained and the code no longer runs anywhere. It stays online, read-only, so the commits, benchmarks and notes can still be linked.
 
+## Using dnsdoh.art? Nothing changes for you
+
+- Same addresses: `https://dnsdoh.art/dns-query`, `tls://dnsdoh.art`, `quic://dnsdoh.art`, `194.180.189.33`.
+- Ad, tracker and malware blocking still works.
+- You do not need to reconfigure anything.
+
+The change happened on the server only. It now runs two upstream programs instead of four patched forks, so there are fewer moving parts.
+
 ## Where dnsdoh.art went
 
 dnsdoh.art used to run AdGuardHome-edge -> Unbound -> dnscrypt-proxy, with patched forks of AdGuardHome, dnsproxy, urlfilter and dnscrypt-proxy. Each upstream release meant rebasing and re-benchmarking all four forks. Between late September and early October 2026 the stack was replaced by two upstream projects with no patches applied:
