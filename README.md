@@ -1,5 +1,28 @@
 # dnsproxy (dnsdoh.art edge fork)
 
+> [!IMPORTANT]
+> **Archived in October 2026.** This repository is no longer maintained and the code no longer runs anywhere. It stays online, read-only, so the commits, benchmarks and notes can still be linked.
+
+## Where dnsdoh.art went
+
+dnsdoh.art used to run AdGuardHome-edge -> Unbound -> dnscrypt-proxy, with patched forks of AdGuardHome, dnsproxy, urlfilter and dnscrypt-proxy. Each upstream release meant rebasing and re-benchmarking all four forks. Between late September and early October 2026 the stack was replaced by two upstream projects with no patches applied:
+
+```
+nginx      443 DoH + DoH3
+  └─> dnsdist  53 plain · 853 DoT + DoQ · blocklists
+        └─> Unbound  127.0.0.1 · DNSSEC validation
+              └─> DoT  Cloudflare 1.1.1.1 · Quad9 9.9.9.10
+```
+
+- **2026-09-27** - dnsdist took over ports 53 and 853 from AdGuardHome-edge.
+- **2026-10-04** - Unbound began forwarding over DoT itself. AdGuardHome-edge, dnsproxy and dnscrypt-proxy were removed from the server.
+
+This fork was the transport layer under AdGuardHome-edge. dnsdist now owns those listeners.
+
+Current versions and the resolver build are at [Ozy-666/unbound-edge](https://github.com/Ozy-666/unbound-edge), and the service at [dnsdoh.art](https://dnsdoh.art).
+
+---
+
 > **Upstream:** Forked from [AdguardTeam/dnsproxy](https://github.com/AdguardTeam/dnsproxy) (Apache-2.0).  
 > **Maintained by:** [Ozy-666](https://github.com/Ozy-666) for the [dnsdoh.art](https://dnsdoh.art) production stack.  
 > **Base Version:** `v0.81.4-edge.1` + `edge-udp-pool` patchset.
